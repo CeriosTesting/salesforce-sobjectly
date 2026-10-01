@@ -1,0 +1,113 @@
+{
+	"name": "@cerios/salesforce-sobjectly",
+	"version": "0.0.0",
+	"description": "Type-safe Salesforce REST API client for TypeScript. Generated SObject types, a typed SOQL builder, CRUD, composite, sObject collections, SOSL, invocable actions/Flow, Tooling API and Bulk API 2.0.",
+	"keywords": [
+		"api",
+		"bulk-api",
+		"cerios",
+		"codegen",
+		"composite",
+		"crm",
+		"rest",
+		"salesforce",
+		"sobject",
+		"soql",
+		"sosl",
+		"tooling-api",
+		"type-safe",
+		"typescript"
+	],
+	"homepage": "https://github.com/CeriosTesting/salesforce-sobjectly#readme",
+	"bugs": {
+		"url": "https://github.com/CeriosTesting/salesforce-sobjectly/issues"
+	},
+	"license": "MIT",
+	"author": "Ronald Veth - Cerios",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/CeriosTesting/salesforce-sobjectly.git"
+	},
+	"bin": {
+		"sobjectly": "dist/cli.cjs"
+	},
+	"files": [
+		"dist",
+		"sobjectly.config.schema.json"
+	],
+	"type": "commonjs",
+	"sideEffects": false,
+	"main": "./dist/index.cjs",
+	"module": "./dist/index.mjs",
+	"types": "./dist/index.d.cts",
+	"exports": {
+		".": {
+			"import": {
+				"types": "./dist/index.d.mts",
+				"default": "./dist/index.mjs"
+			},
+			"require": {
+				"types": "./dist/index.d.cts",
+				"default": "./dist/index.cjs"
+			}
+		},
+		"./codegen": {
+			"import": {
+				"types": "./dist/codegen.d.mts",
+				"default": "./dist/codegen.mjs"
+			},
+			"require": {
+				"types": "./dist/codegen.d.cts",
+				"default": "./dist/codegen.cjs"
+			}
+		},
+		"./sobjectly.config.schema.json": "./sobjectly.config.schema.json",
+		"./package.json": "./package.json"
+	},
+	"publishConfig": {
+		"access": "public",
+		"provenance": true
+	},
+	"scripts": {
+		"build": "tsdown",
+		"changeset": "changeset",
+		"check-exports": "attw --pack . --profile node16",
+		"compile": "tsc --noEmit",
+		"deps:update": "npx npm-check-updates -u --dep prod,dev,optional,peer,packageManager --install never && npm install",
+		"format": "oxfmt",
+		"format:check": "oxfmt --check",
+		"lint": "oxlint --type-aware",
+		"lint:fix": "oxlint --type-aware --fix",
+		"pack": "npm pack",
+		"prepare": "husky",
+		"release": "changeset publish",
+		"test": "vitest --run",
+		"test:coverage": "vitest --run --coverage",
+		"test:integration": "vitest --run --config vitest.integration.config.mts",
+		"test:smoke": "node scripts/smoke.mjs",
+		"test:watch": "vitest --watch",
+		"version-packages": "changeset version",
+		"version-packages:prepare-release": "npm run version-packages && npm run format"
+	},
+	"dependencies": {
+		"jiti": "^2.7.0"
+	},
+	"devDependencies": {
+		"@arethetypeswrong/cli": "^0.18.5",
+		"@changesets/cli": "^3.0.3",
+		"@types/node": "^26.6.3",
+		"@vitest/coverage-v8": "5.0.3",
+		"husky": "^9.1.7",
+		"lint-staged": "^17.6.0",
+		"npm-check-updates": "^23.1.0",
+		"oxfmt": "^0.71.0",
+		"oxlint": "^1.86.0",
+		"oxlint-tsgolint": "^7.0.2003",
+		"tsdown": "^0.23.0",
+		"typescript": "^7.0.2",
+		"vitest": "^5.0.3"
+	},
+	"engines": {
+		"node": ">=20.19.0"
+	}
+}

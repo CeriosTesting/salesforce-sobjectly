@@ -1,0 +1,147 @@
+{
+	"$schema": "http://json-schema.org/draft-07/schema#",
+	"$id": "https://unpkg.com/@cerios/salesforce-sobjectly/sobjectly.config.schema.json",
+	"title": "sobjectly config",
+	"description": "Configuration for `sobjectly generate` (@cerios/salesforce-sobjectly).",
+	"type": "object",
+	"additionalProperties": false,
+	"required": ["apiVersion", "output"],
+	"properties": {
+		"$schema": {
+			"type": "string",
+			"description": "The JSON Schema for this file."
+		},
+		"apiVersion": {
+			"type": "string",
+			"pattern": "^v\\d+\\.\\d+$",
+			"description": "The Salesforce REST API version to describe with, e.g. \"v66.0\". Exported as API_VERSION in the generated file.",
+			"examples": ["v66.0"]
+		},
+		"output": {
+			"type": "string",
+			"pattern": "\\.(ts|mts|cts)$",
+			"description": "The generated TypeScript file, relative to this config file.",
+			"examples": ["src/generated/sobjects.ts"]
+		},
+		"sobjects": {
+			"type": "array",
+			"description": "The sObjects to generate types for. Without it, every queryable sObject is generated.",
+			"items": { "$ref": "#/definitions/sobjectName" },
+			"examples": [["Account", "Contact"]]
+		},
+		"exclude": {
+			"type": "array",
+			"description": "sObjects to skip.",
+			"items": { "$ref": "#/definitions/sobjectName" }
+		},
+		"auth": {
+			"description": "How the generator logs in. Credentials are read from environment variables. Defaults to client credentials from SF_LOGIN_URL, SF_CLIENT_ID and SF_CLIENT_SECRET.",
+			"oneOf": [
+				{
+					"type": "object",
+					"additionalProperties": false,
+					"required": ["type"],
+					"properties": {
+						"type": { "const": "clientCredentials" },
+						"loginUrlEnv": {
+							"$ref": "#/definitions/envName",
+							"description": "Defaults to SF_LOGIN_URL (your My Domain URL)."
+						},
+						"clientIdEnv": { "$ref": "#/definitions/envName", "description": "Defaults to SF_CLIENT_ID." },
+						"clientSecretEnv": { "$ref": "#/definitions/envName", "description": "Defaults to SF_CLIENT_SECRET." }
+					}
+				},
+				{
+					"type": "object",
+					"additionalProperties": false,
+					"required": ["type"],
+					"properties": {
+						"type": { "const": "accessToken" },
+						"accessTokenEnv": { "$ref": "#/definitions/envName", "description": "Defaults to SF_ACCESS_TOKEN." },
+						"instanceUrlEnv": { "$ref": "#/definitions/envName", "description": "Defaults to SF_INSTANCE_URL." }
+					}
+				},
+				{
+					"type": "object",
+					"additionalProperties": false,
+					"required": ["type"],
+					"properties": {
+						"type": { "const": "jwtBearer" },
+						"loginUrlEnv": { "$ref": "#/definitions/envName", "description": "Defaults to SF_LOGIN_URL." },
+						"clientIdEnv": { "$ref": "#/definitions/envName", "description": "Defaults to SF_CLIENT_ID." },
+						"usernameEnv": { "$ref": "#/definitions/envName", "description": "Defaults to SF_USERNAME." },
+						"privateKeyEnv": {
+							"$ref": "#/definitions/envName",
+							"description": "The PEM key itself. Defaults to SF_PRIVATE_KEY."
+						},
+						"privateKeyPathEnv": {
+							"$ref": "#/definitions/envName",
+							"description": "A path to the PEM key file. Defaults to SF_PRIVATE_KEY_PATH."
+						}
+					}
+				},
+				{
+					"type": "object",
+					"additionalProperties": false,
+					"required": ["type"],
+					"properties": {
+						"type": { "const": "sfCli" },
+						"targetOrg": {
+							"type": "string",
+							"minLength": 1,
+							"description": "The Salesforce CLI org alias or username. Defaults to the CLI's default org."
+						}
+					}
+				}
+			]
+		},
+		"excludeCreateFields": {
+			"$ref": "#/definitions/fieldMap",
+			"description": "Per sObject, fields to leave out of the create input."
+		},
+		"excludeUpdateFields": {
+			"$ref": "#/definitions/fieldMap",
+			"description": "Per sObject, fields to leave out of the update input."
+		},
+		"picklists": {
+			"enum": ["union", "string"],
+			"description": "\"union\" (default): picklists become unions of their values. \"string\": plain strings."
+		},
+		"constants": {
+			"type": "boolean",
+			"description": "Emit the PICKLIST_VALUES and RECORD_TYPES runtime constants. Defaults to true."
+		},
+		"concurrency": {
+			"type": "integer",
+			"minimum": 1,
+			"description": "Parallel describe calls. Defaults to 10."
+		},
+		"continueOnDescribeError": {
+			"type": "boolean",
+			"description": "Skip sObjects whose describe fails instead of failing the run. Defaults to false."
+		},
+		"importSource": {
+			"type": "string",
+			"minLength": 1,
+			"description": "Where the generated file imports helper types from. Defaults to \"@cerios/salesforce-sobjectly\"."
+		}
+	},
+	"definitions": {
+		"sobjectName": {
+			"type": "string",
+			"pattern": "^[A-Za-z][A-Za-z0-9_]*$"
+		},
+		"envName": {
+			"type": "string",
+			"minLength": 1
+		},
+		"fieldMap": {
+			"type": "object",
+			"propertyNames": { "$ref": "#/definitions/sobjectName" },
+			"additionalProperties": {
+				"type": "array",
+				"items": { "type": "string", "minLength": 1 }
+			}
+		}
+	}
+}

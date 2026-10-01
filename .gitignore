@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+examples/
+*.tgz
+.env
+.env.*
+!.env.example
+.reference/
+tests/tmp-*/

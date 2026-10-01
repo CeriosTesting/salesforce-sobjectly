@@ -1,0 +1,384 @@
+import { createHash } from "node:crypto";
+
+import type { ApiVersion } from "../types/common";
+import type { ChildRelationship, RecordTypeInfo } from "../types/describe";
+
+import type { PicklistMode } from "./config";
+import { ADDRESS_TYPE, type CodegenField, GEOLOCATION_TYPE, mapFieldType } from "./type-mapper";
+
+/** The subset of an sObject describe the generator needs. */
+export interface CodegenDescribe {
+	name: string;
+	label?: string;
+	fields: CodegenField[];
+	childRelationships: Pick<ChildRelationship, "childSObject" | "field" | "relationshipName">[];
+	recordTypeInfos?: Pick<RecordTypeInfo, "developerName">[];
+}
+
+export interface GenerateSourceOptions {
+	excludeCreateFields?: Partial<Record<string, readonly string[]>>;
+	excludeUpdateFields?: Partial<Record<string, readonly string[]>>;
+	picklists?: PicklistMode;
+	importSource?: string;
+	/** When set, the output exports it as `API_VERSION`, so the client can use the same version. */
+	apiVersion?: ApiVersion;
+	/** Emit the `PICKLIST_VALUES` and `RECORD_TYPES` runtime constants. Defaults to `true`. */
+	constants?: boolean;
+}
+
+/** Field types whose kind is recorded in the registry's `fieldKinds`. */
+const FIELD_KINDS = new Set(["date", "datetime", "time", "multipicklist"]);
+
+const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
+/**
+ * Generates the TypeScript source for a set of sObject describes: a read interface, create
+ * and update input types per sObject, and the `SObjectRegistry` that ties them together.
+ * The output is deterministic: sObjects are sorted by name and fields by name (`Id` first).
+ */
+export function generateSource(describes: readonly CodegenDescribe[], options: GenerateSourceOptions = {}): string {
+	const sorted = [...describes].sort((a, b) => compare(a.name, b.name));
+	assertGeneratableNames(sorted);
+	const names = new Set(sorted.map((describe) => describe.name));
+	const sections = [imports(sorted, options.importSource ?? "@cerios/salesforce-sobjectly")];
+	const objectHashes: string[] = [];
+
+	for (const describe of sorted) {
+		const objectSections = [
+			readInterface(describe, options.picklists ?? "union"),
+			inputType(describe, "CreateInput", "createable", lookup(options.excludeCreateFields, describe.name)),
+			inputType(describe, "UpdateInput", "updateable", lookup(options.excludeUpdateFields, describe.name)),
+		];
+		sections.push(...objectSections);
+		const fingerprint = [
+			...objectSections,
+			registryEntry(describe, names),
+			options.constants === false ? "" : picklistEntry(describe),
+		].join("\n");
+		objectHashes.push(`${describe.name}:${sha256(fingerprint).slice(0, OBJECT_HASH_LENGTH)}`);
+	}
+	sections.push(registry(sorted, names));
+	if (options.constants !== false) {
+		sections.push(picklistConstants(sorted), recordTypeConstants(sorted));
+	}
+	if (options.apiVersion) {
+		sections.push(apiVersionConstant(options.apiVersion));
+	}
+	const body = sections.filter((section) => section.length > 0).join("\n\n");
+	return `${header(sha256(body), objectHashes)}\n\n${body}\n`;
+}
+
+/** Names the generated file uses itself; an sObject with one of these names would break it. */
+const RESERVED_TYPE_NAMES = new Set([
+	"Record",
+	"Pick",
+	"Partial",
+	"SObjectRegistry",
+	"PICKLIST_VALUES",
+	"RECORD_TYPES",
+	"API_VERSION",
+	ADDRESS_TYPE,
+	GEOLOCATION_TYPE,
+]);
+
+/** Fails with a clear message for sObject names the generated TypeScript can't represent. */
+function assertGeneratableNames(describes: readonly CodegenDescribe[]): void {
+	const seen = new Map<string, string>();
+	const generated = new Set(
+		describes.flatMap((describe) => [`${describe.name}CreateInput`, `${describe.name}UpdateInput`]),
+	);
+	for (const { name } of describes) {
+		if (!IDENTIFIER.test(name)) {
+			throw new Error(`sObject name "${name}" is not a valid TypeScript identifier.`);
+		}
+		if (RESERVED_TYPE_NAMES.has(name) || generated.has(name)) {
+			throw new Error(`sObject name "${name}" clashes with a type the generated file defines; exclude it.`);
+		}
+		const previous = seen.get(name.toLowerCase());
+		if (previous !== undefined) {
+			throw new Error(`sObjects "${previous}" and "${name}" differ only in case; list each sObject once.`);
+		}
+		seen.set(name.toLowerCase(), name);
+	}
+}
+
+/** Looks up a per-sObject option case-insensitively (sObject names are case-insensitive in Salesforce). */
+function lookup(map: Partial<Record<string, readonly string[]>> | undefined, name: string): readonly string[] {
+	if (!map) {
+		return [];
+	}
+	const key = Object.keys(map).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+	return key === undefined ? [] : (map[key] ?? []);
+}
+
+const CONTENT_HASH_PREFIX = "// sobjectly-content-hash: sha256:";
+const OBJECT_HASHES_PREFIX = "// sobjectly-sobjects: ";
+const OBJECT_HASH_LENGTH = 12;
+
+function header(contentHash: string, objectHashes: readonly string[]): string {
+	return [
+		"// ──────────────────────────────────────────────────────────────",
+		"// AUTO-GENERATED by @cerios/salesforce-sobjectly (`sobjectly generate`).",
+		"// Do not edit manually; re-run the generator instead.",
+		"// ──────────────────────────────────────────────────────────────",
+		`${CONTENT_HASH_PREFIX}${contentHash}`,
+		`${OBJECT_HASHES_PREFIX}${objectHashes.join(",")}`,
+		"/* eslint-disable */",
+	].join("\n");
+}
+
+/** The content hashes a generated file records in its header. */
+export interface GeneratedFileHashes {
+	/** SHA-256 of the unformatted generated content; formatting changes don't affect it. */
+	contentHash: string;
+	/** Short hash per sObject, to tell which sObjects changed. */
+	sobjects: Map<string, string>;
+}
+
+/** Reads the content hashes from a generated file's header (also after reformatting). */
+export function readGeneratedHashes(source: string): GeneratedFileHashes | undefined {
+	const lines = source.split(/\r?\n/).map((line) => line.trim());
+	const hashLine = lines.find((line) => line.startsWith(CONTENT_HASH_PREFIX));
+	if (!hashLine) {
+		return undefined;
+	}
+	const objectsLine = lines.find((line) => line.startsWith(OBJECT_HASHES_PREFIX)) ?? OBJECT_HASHES_PREFIX;
+	const sobjects = new Map<string, string>();
+	for (const entry of objectsLine.slice(OBJECT_HASHES_PREFIX.length).split(",")) {
+		const [name, hash] = entry.split(":");
+		if (name && hash) {
+			sobjects.set(name, hash);
+		}
+	}
+	return { contentHash: hashLine.slice(CONTENT_HASH_PREFIX.length), sobjects };
+}
+
+function sha256(text: string): string {
+	return createHash("sha256").update(text).digest("hex");
+}
+
+function imports(describes: readonly CodegenDescribe[], importSource: string): string {
+	const used: string[] = [];
+	const fields = describes.flatMap((describe) => describe.fields);
+	if (fields.some((field) => field.type === "address")) {
+		used.push(ADDRESS_TYPE);
+	}
+	if (fields.some((field) => field.type === "location")) {
+		used.push(GEOLOCATION_TYPE);
+	}
+	return used.length > 0 ? `import type { ${used.join(", ")} } from ${JSON.stringify(importSource)};` : "";
+}
+
+function sortedFields(describe: CodegenDescribe): CodegenField[] {
+	return [...describe.fields].sort((a, b) => (a.name === "Id" ? -1 : b.name === "Id" ? 1 : compare(a.name, b.name)));
+}
+
+function readInterface(describe: CodegenDescribe, picklists: PicklistMode): string {
+	const lines = sortedFields(describe).map((field) => {
+		const comment = `\t/** ${escapeComment(field.label)} (${escapeComment(field.type)}) */`;
+		return `${comment}\n\t${propertyKey(field.name)}: ${mapFieldType(field, picklists)};`;
+	});
+	const doc = describe.label ? `/** ${escapeComment(describe.label)} */\n` : "";
+	return `${doc}export interface ${describe.name} {\n${lines.join("\n")}\n}`;
+}
+
+/**
+ * Create input: required fields are `createable && !nillable && !defaultedOnCreate`; other
+ * createable fields are optional. Validation rules and record types can add more requirements
+ * at runtime. Update input: every updateable field is optional.
+ */
+function inputType(
+	describe: CodegenDescribe,
+	suffix: "CreateInput" | "UpdateInput",
+	flag: "createable" | "updateable",
+	excluded: readonly string[],
+): string {
+	const typeName = `${describe.name}${suffix}`;
+	const excludedNames = new Set(excluded.map((name) => name.toLowerCase()));
+	const allowed = sortedFields(describe).filter((field) => field[flag] && !excludedNames.has(field.name.toLowerCase()));
+	if (allowed.length === 0) {
+		return `export type ${typeName} = Record<string, never>;`;
+	}
+	const required =
+		suffix === "CreateInput"
+			? allowed.filter((field) => !field.nillable && !field.defaultedOnCreate).map((field) => field.name)
+			: [];
+	const optional = allowed.map((field) => field.name).filter((name) => !required.includes(name));
+	const parts: string[] = [];
+	if (required.length > 0) {
+		parts.push(`Pick<${describe.name}, ${keyUnion(required)}>`);
+	}
+	if (optional.length > 0) {
+		parts.push(`Partial<Pick<${describe.name}, ${keyUnion(optional)}>>`);
+	}
+	return `export type ${typeName} = ${parts.join(" & ")};`;
+}
+
+function registry(describes: readonly CodegenDescribe[], names: ReadonlySet<string>): string {
+	const entries = describes.map((describe) => registryEntry(describe, names));
+	return [
+		"/**",
+		" * Maps every generated sObject to its read, create and update types and its relationships.",
+		" * Pass it to the client: `new SalesforceClient<SObjectRegistry>({ ... })`.",
+		" */",
+		"export interface SObjectRegistry {",
+		...entries,
+		"}",
+	].join("\n");
+}
+
+function registryEntry(describe: CodegenDescribe, names: ReadonlySet<string>): string {
+	const parents = describe.fields
+		.filter(
+			(field) =>
+				field.relationshipName &&
+				field.referenceTo.length === 1 &&
+				names.has(field.referenceTo[0]) &&
+				IDENTIFIER.test(field.relationshipName),
+		)
+		.map((field) => [field.relationshipName as string, field.referenceTo[0]] as const);
+	const children = describe.childRelationships
+		.filter(
+			(relationship) =>
+				relationship.relationshipName &&
+				names.has(relationship.childSObject) &&
+				IDENTIFIER.test(relationship.relationshipName),
+		)
+		.map((relationship) => [relationship.relationshipName as string, relationship.childSObject] as const);
+	return [
+		`\t${describe.name}: {`,
+		`\t\tread: ${describe.name};`,
+		`\t\tcreate: ${describe.name}CreateInput;`,
+		`\t\tupdate: ${describe.name}UpdateInput;`,
+		`\t\tparents: ${relationshipMap(parents)};`,
+		`\t\tchildren: ${relationshipMap(children)};`,
+		`\t\texternalIds: ${unionOrNever(externalIdFields(describe))};`,
+		`\t\tfieldKinds: ${fieldKindMap(describe)};`,
+		`\t\trecordTypes: ${unionOrNever(recordTypeNames(describe))};`,
+		`\t\tpolymorphicParents: ${polymorphicMap(describe)};`,
+		"\t};",
+	].join("\n");
+}
+
+/** `Id` plus every field marked `externalId` or `idLookup`: the fields upsert accepts. */
+function externalIdFields(describe: CodegenDescribe): string[] {
+	const names = describe.fields
+		.filter((field) => field.name === "Id" || field.externalId === true || field.idLookup === true)
+		.map((field) => field.name);
+	return [...new Set(names)].sort(compare);
+}
+
+function recordTypeNames(describe: CodegenDescribe): string[] {
+	const names = (describe.recordTypeInfos ?? []).map((info) => info.developerName);
+	return [...new Set(names.filter((name) => typeof name === "string" && name.length > 0))].sort(compare);
+}
+
+function fieldKindMap(describe: CodegenDescribe): string {
+	const lines = sortedFields(describe)
+		.filter((field) => FIELD_KINDS.has(field.type))
+		.map((field) => `\t\t\t${propertyKey(field.name)}: ${JSON.stringify(field.type)};`);
+	return lines.length > 0 ? `{\n${lines.join("\n")}\n\t\t}` : "Record<never, never>";
+}
+
+/** Lookups with more than one target (e.g. `Owner` -> User or Group); `parents` leaves these out. */
+function polymorphicMap(describe: CodegenDescribe): string {
+	const entries = new Map<string, string>();
+	for (const field of sortedFields(describe)) {
+		const name = field.relationshipName;
+		if (name && field.referenceTo.length > 1 && IDENTIFIER.test(name) && !entries.has(name)) {
+			entries.set(name, unionOrNever([...field.referenceTo].sort(compare)));
+		}
+	}
+	const lines = [...entries.entries()]
+		.sort(([a], [b]) => compare(a, b))
+		.map(([name, targets]) => `\t\t\t${name}: ${targets};`);
+	return lines.length > 0 ? `{\n${lines.join("\n")}\n\t\t}` : "Record<never, never>";
+}
+
+/** `PICKLIST_VALUES`: the active values of every picklist and multi-select picklist field. */
+function picklistConstants(describes: readonly CodegenDescribe[]): string {
+	const entries = describes.map(picklistEntry).filter((entry) => entry.length > 0);
+	return [
+		"/** Active picklist values per sObject and field, e.g. to loop over every status in a test. */",
+		`export const PICKLIST_VALUES = {${entries.length > 0 ? `\n${entries.join("\n")}\n` : ""}} as const;`,
+	].join("\n");
+}
+
+/** One sObject's entry in `PICKLIST_VALUES`, or `""` when it has no picklists. */
+function picklistEntry(describe: CodegenDescribe): string {
+	const fields = sortedFields(describe)
+		.map((field) => [field.name, activePicklistValues(field)] as const)
+		.filter(([, values]) => values.length > 0)
+		.map(([name, values]) => `\t\t${propertyKey(name)}: [${values.map((value) => JSON.stringify(value)).join(", ")}],`);
+	return fields.length > 0 ? `\t${describe.name}: {\n${fields.join("\n")}\n\t},` : "";
+}
+
+/** `RECORD_TYPES`: the record type DeveloperNames per sObject. */
+function recordTypeConstants(describes: readonly CodegenDescribe[]): string {
+	const entries = describes
+		.map((describe) => [describe.name, recordTypeNames(describe)] as const)
+		.filter(([, names]) => names.length > 0)
+		.map(([name, names]) => `\t${name}: [${names.map((value) => JSON.stringify(value)).join(", ")}],`);
+	return [
+		"/** Record type DeveloperNames per sObject. Resolve ids with `sf.sobject(name).recordTypeId(developerName)`. */",
+		`export const RECORD_TYPES = {${entries.length > 0 ? `\n${entries.join("\n")}\n` : ""}} as const;`,
+	].join("\n");
+}
+
+function activePicklistValues(field: CodegenField): string[] {
+	if (field.type !== "picklist" && field.type !== "multipicklist" && field.type !== "combobox") {
+		return [];
+	}
+	return [...new Set((field.picklistValues ?? []).filter((entry) => entry.active).map((entry) => entry.value))];
+}
+
+function unionOrNever(values: readonly string[]): string {
+	return values.length > 0 ? values.map((value) => JSON.stringify(value)).join(" | ") : "never";
+}
+
+function apiVersionConstant(apiVersion: ApiVersion): string {
+	if (!/^v\d+\.\d+$/.test(apiVersion)) {
+		throw new Error(`Invalid apiVersion "${apiVersion}".`);
+	}
+	return [
+		"/**",
+		" * The API version these types were generated with. Pass it to the client so requests use the",
+		" * same version: `new SalesforceClient<SObjectRegistry>({ apiVersion: API_VERSION, ... })`.",
+		" */",
+		`export const API_VERSION = ${JSON.stringify(apiVersion)};`,
+	].join("\n");
+}
+
+function relationshipMap(entries: readonly (readonly [string, string])[]): string {
+	const unique = new Map<string, string>();
+	for (const [name, target] of entries) {
+		if (!unique.has(name)) {
+			unique.set(name, target);
+		}
+	}
+	if (unique.size === 0) {
+		return "Record<never, never>";
+	}
+	const lines = [...unique.entries()]
+		.sort(([a], [b]) => compare(a, b))
+		.map(([name, target]) => `\t\t\t${name}: ${JSON.stringify(target)};`);
+	return `{\n${lines.join("\n")}\n\t\t}`;
+}
+
+function keyUnion(names: readonly string[]): string {
+	return names.map((name) => JSON.stringify(name)).join(" | ");
+}
+
+function propertyKey(name: string): string {
+	return IDENTIFIER.test(name) ? name : JSON.stringify(name);
+}
+
+function escapeComment(value: string | null | undefined): string {
+	return String(value ?? "")
+		.replace(/\*\//g, "*\\/")
+		.replace(/\r?\n/g, " ");
+}
+
+function compare(a: string, b: string): number {
+	return a < b ? -1 : a > b ? 1 : 0;
+}
