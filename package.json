@@ -1,6 +1,6 @@
 {
 	"name": "@cerios/salesforce-sobjectly",
-	"version": "0.0.0",
+	"version": "1.0.0",
 	"description": "Type-safe Salesforce REST API client for TypeScript. Generated SObject types, a typed SOQL builder, CRUD, composite, sObject collections, SOSL, invocable actions/Flow, Tooling API and Bulk API 2.0.",
 	"keywords": [
 		"api",
