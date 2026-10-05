@@ -128,7 +128,7 @@ With a generated registry, `where`, `whereIn` and `whereRelated` check the value
 | Time                | `soqlLiteral("13:00:00.000Z")`                                                 |
 | Number              | a `number`                                                                     |
 | Checkbox            | `true` / `false`, only with `=` and `!=`                                       |
-| Restricted picklist | only its values                                                                |
+| Restricted picklist | only its values (only enum members with `picklists: "enum"`)                   |
 | `null`              | `!= null` on any field; `= null` only on nillable fields                       |
 
 `LIKE` only works on text fields.

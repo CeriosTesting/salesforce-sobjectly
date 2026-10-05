@@ -103,6 +103,27 @@ describe("mapFieldType", () => {
 		expect(mapFieldType(field("picklist", { picklistValues: values }), "string")).toBe("string");
 		expect(mapFieldType(field("picklist", { picklistValues: [], restrictedPicklist: true }))).toBe("string");
 	});
+
+	it("uses the named picklist type in const and enum mode", () => {
+		const values = ["A", "B"].map((value) => ({
+			active: true,
+			defaultValue: false,
+			label: value,
+			validFor: null,
+			value,
+		}));
+		const restricted = field("picklist", { picklistValues: values, restrictedPicklist: true, nillable: true });
+		expect(mapFieldType(restricted, "const", "CaseStatus")).toBe("CaseStatus | null");
+		expect(mapFieldType(restricted, "enum", "CaseStatus")).toBe("CaseStatus | null");
+		expect(mapFieldType(field("combobox", { picklistValues: values }), "const", "CaseChannel")).toBe(
+			"CaseChannel | (string & {})",
+		);
+		// Without a type name, or in the other modes, the name is not used.
+		expect(mapFieldType(restricted, "const")).toBe('"A" | "B" | null');
+		expect(mapFieldType(restricted, "union", "CaseStatus")).toBe('"A" | "B" | null');
+		expect(mapFieldType(restricted, "string", "CaseStatus")).toBe("string | null");
+		expect(mapFieldType(field("multipicklist", { picklistValues: values }), "const", "Interests")).toBe("string");
+	});
 });
 
 describe("generateSource", () => {
@@ -112,12 +133,23 @@ describe("generateSource", () => {
 		await expect(generateSource(describes, options)).toMatchFileSnapshot("../fixtures/generated-sobjects.ts");
 	});
 
-	it("is deterministic regardless of input order", () => {
-		const reversed = [...describes]
-			.reverse()
-			.map((describe) => ({ ...describe, fields: [...describe.fields].reverse() }));
-		expect(generateSource(reversed, options)).toBe(generateSource(describes, options));
+	it.each(["const", "enum"] as const)("matches the generated fixture with picklists: %s", async (picklists) => {
+		await expect(generateSource(describes, { ...options, picklists })).toMatchFileSnapshot(
+			`../fixtures/generated-sobjects-${picklists}.ts`,
+		);
 	});
+
+	it.each(["union", "const", "enum"] as const)(
+		"is deterministic regardless of input order (picklists: %s)",
+		(picklists) => {
+			const reversed = [...describes]
+				.reverse()
+				.map((describe) => ({ ...describe, fields: [...describe.fields].reverse() }));
+			expect(generateSource(reversed, { ...options, picklists })).toBe(
+				generateSource(describes, { ...options, picklists }),
+			);
+		},
+	);
 
 	it("requires createable, non-nillable fields without a default on create", () => {
 		const source = generateSource(describes, options);
@@ -312,5 +344,105 @@ describe("generateSource picklist constants", () => {
 			constants: false,
 		});
 		expect(readGeneratedHashes(after)).toEqual(readGeneratedHashes(before));
+	});
+});
+
+describe("generateSource named picklist types", () => {
+	const options = { importSource: "../../src/index", apiVersion: "v67.0" as const };
+
+	it("declares each picklist type before its sObject and uses it for the field", () => {
+		const source = generateSource(describes, { ...options, picklists: "const" });
+		expect(source).toContain(
+			'export const CaseStatus = {\n\tNew: "New",\n\tWorking: "Working",\n\tClosed: "Closed",\n} as const;\n' +
+				"export type CaseStatus = (typeof CaseStatus)[keyof typeof CaseStatus];",
+		);
+		expect(source.indexOf("export const CaseStatus")).toBeLessThan(source.indexOf("export interface Case {"));
+		expect(source).toContain("\tStatus: CaseStatus;");
+		expect(source).toContain("\tType: AccountType | (string & {}) | null;");
+		expect(source).toContain("\tChannel__c: CaseChannelCustom | (string & {}) | null;");
+		// Multi-select picklists get a named type, but the field stays a `;`-separated string.
+		expect(source).toContain("export const ContactInterestsCustom = {");
+		expect(source).toContain("\tInterests__c: string | null;");
+	});
+
+	it.each(["const", "enum"] as const)(
+		"keeps the picklist's value order, not alphabetical (picklists: %s)",
+		(picklists) => {
+			const values = ["Working", "New", "10", "5", "1", "Closed Won", "Closed"];
+			const status: CodegenField = {
+				...field("picklist", { restrictedPicklist: true }),
+				name: "Status",
+				picklistValues: values.map((value) => ({
+					active: true,
+					defaultValue: false,
+					label: value,
+					validFor: null,
+					value,
+				})),
+			};
+			const source = generateSource([{ name: "Case", fields: [status], childRelationships: [] }], { picklists });
+			const start = source.indexOf(picklists === "enum" ? "export enum CaseStatus {" : "export const CaseStatus = {");
+			const body = source.slice(start, source.indexOf("}", start));
+			const emitted = [...body.matchAll(/(?:=|:) ("[^"]*"),$/gm)].map((match) => JSON.parse(match[1]) as string);
+			expect(emitted).toEqual(values);
+		},
+	);
+
+	it("emits enums in enum mode", () => {
+		const source = generateSource(describes, { ...options, picklists: "enum" });
+		expect(source).toContain(
+			'export enum CaseStatus {\n\tNew = "New",\n\tWorking = "Working",\n\tClosed = "Closed",\n}',
+		);
+		expect(source).toContain("\tStatus: CaseStatus;");
+		expect(source).not.toContain("export const CaseStatus");
+	});
+
+	it("keeps the named types when constants are disabled", () => {
+		const source = generateSource(describes, { ...options, picklists: "const", constants: false });
+		expect(source).toContain("export const CaseStatus = {");
+		expect(source).not.toContain("PICKLIST_VALUES");
+	});
+
+	it("suffixes a picklist type whose name is taken by a generated sObject", () => {
+		const caseStatus: CodegenDescribe = { name: "CaseStatus", fields: [], childRelationships: [] };
+		const source = generateSource([...describes, caseStatus], { ...options, picklists: "const" });
+		expect(source).toContain("export interface CaseStatus {");
+		expect(source).toContain("export const CaseStatusPicklist = {");
+		expect(source).toContain("\tStatus: CaseStatusPicklist;");
+	});
+
+	it("changes the sObject's hash when its picklist values change, also without constants", () => {
+		const withStatus = (values: string[]): CodegenDescribe[] =>
+			describes.map((describe) =>
+				describe.name === "Case"
+					? {
+							...describe,
+							fields: describe.fields.map((item) =>
+								item.name === "Status"
+									? {
+											...item,
+											picklistValues: values.map((text) => ({
+												active: true,
+												defaultValue: false,
+												label: text,
+												validFor: null,
+												value: text,
+											})),
+										}
+									: item,
+							),
+						}
+					: describe,
+			);
+		const settings = { ...options, picklists: "const" as const, constants: false };
+		const before = readGeneratedHashes(generateSource(withStatus(["New", "Closed"]), settings));
+		const after = readGeneratedHashes(generateSource(withStatus(["New", "Escalated", "Closed"]), settings));
+		expect(after?.sobjects.get("Case")).not.toBe(before?.sobjects.get("Case"));
+		expect(after?.sobjects.get("Account")).toBe(before?.sobjects.get("Account"));
+	});
+
+	it("leaves the default union output unchanged", () => {
+		expect(generateSource(describes, { ...options, picklists: "union" })).toBe(generateSource(describes, options));
+		expect(generateSource(describes, options)).not.toContain("export const CaseStatus");
 	});
 });

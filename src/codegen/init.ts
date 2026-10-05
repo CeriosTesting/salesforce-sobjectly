@@ -63,6 +63,8 @@ const AUTH_CHOICES: Choice<InitAuthType>[] = [
 const PICKLIST_CHOICES: Choice<PicklistMode>[] = [
 	{ value: "union", label: 'Union of values, e.g. "New" | "Closed" (type-safe)' },
 	{ value: "string", label: "Plain string" },
+	{ value: "const", label: "Union plus a named constant per picklist, e.g. CaseStatus.Closed" },
+	{ value: "enum", label: "TypeScript enum per picklist (restricted picklists only accept enum members)" },
 ];
 
 const FORMAT_CHOICES: Choice<InitConfigFormat>[] = [

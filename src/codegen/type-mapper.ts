@@ -52,20 +52,34 @@ export const FIELD_TYPE_MAP: Readonly<Record<string, string>> = {
 	location: GEOLOCATION_TYPE,
 };
 
-/** Returns the TypeScript type for a field, including `| null` for nillable fields. */
-export function mapFieldType(field: CodegenField, picklists: PicklistMode = "union"): string {
-	const base = picklistType(field, picklists) ?? FIELD_TYPE_MAP[field.type] ?? "unknown";
+/**
+ * Returns the TypeScript type for a field, including `| null` for nillable fields. With picklist
+ * mode `"const"` or `"enum"`, `typeName` is the field's named picklist type; it replaces the union.
+ */
+export function mapFieldType(field: CodegenField, picklists: PicklistMode = "union", typeName?: string): string {
+	const base = picklistType(field, picklists, typeName) ?? FIELD_TYPE_MAP[field.type] ?? "unknown";
 	return field.nillable && base !== "unknown" ? `${base} | null` : base;
 }
 
-function picklistType(field: CodegenField, picklists: PicklistMode): string | undefined {
-	if (picklists !== "union" || (field.type !== "picklist" && field.type !== "combobox")) {
+function picklistType(field: CodegenField, picklists: PicklistMode, typeName: string | undefined): string | undefined {
+	if (picklists === "string" || (field.type !== "picklist" && field.type !== "combobox")) {
 		return undefined;
 	}
-	const values = [...new Set((field.picklistValues ?? []).filter((entry) => entry.active).map((entry) => entry.value))];
+	const values = activePicklistValues(field);
 	if (values.length === 0) {
 		return undefined;
 	}
-	const union = values.map((value) => JSON.stringify(value)).join(" | ");
-	return field.restrictedPicklist && field.type === "picklist" ? union : `${union} | (string & {})`;
+	const members =
+		picklists !== "union" && typeName !== undefined
+			? typeName
+			: values.map((value) => JSON.stringify(value)).join(" | ");
+	return field.restrictedPicklist && field.type === "picklist" ? members : `${members} | (string & {})`;
+}
+
+/** The distinct active values of a picklist, multi-select picklist or combobox, in describe order. */
+export function activePicklistValues(field: CodegenField): string[] {
+	if (field.type !== "picklist" && field.type !== "multipicklist" && field.type !== "combobox") {
+		return [];
+	}
+	return [...new Set((field.picklistValues ?? []).filter((entry) => entry.active).map((entry) => entry.value))];
 }

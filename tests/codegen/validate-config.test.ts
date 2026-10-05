@@ -81,7 +81,7 @@ describe("validateConfig", () => {
 			'sobjects[1]: "Bad Name" is not a valid sObject API name.',
 			'excludeCreateFields.Acount: "Acount" is not listed in sobjects.',
 			'excludeCreateFields.Account: must be an array of field API names, got "Name".',
-			'picklists: must be "union" or "string", got "unions".',
+			'picklists: must be one of union, string, const, enum, got "unions".',
 			"concurrency: must be a positive integer, got 0.",
 			'continueOnDescribeError: must be true or false, got "yes".',
 		]);
