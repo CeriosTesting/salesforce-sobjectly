@@ -87,13 +87,32 @@ describe("validateConfig", () => {
 		]);
 	});
 
-	it("validates env-based auth", () => {
+	it("validates auth", () => {
 		expect(problems({ ...valid, auth: { type: "password" } })).toEqual([
 			'auth.type: must be one of clientCredentials, accessToken, jwtBearer, sfCli, got "password".',
 		]);
 		expect(problems({ ...valid, auth: { type: "accessToken", clientIdEnv: "X", instanceUrlEnv: "" } })).toEqual([
-			'auth.clientIdEnv: not an option of "accessToken". Valid options: accessTokenEnv, instanceUrlEnv.',
+			'auth.clientIdEnv: not an option of "accessToken". Valid options: accessToken, instanceUrl.',
 			'auth.instanceUrlEnv: must be a non-empty string, got "".',
+		]);
+	});
+
+	it("accepts credential values, which may still be undefined (process.env)", () => {
+		const auth = { type: "clientCredentials", loginUrl: "${SF_LOGIN_URL}", clientId: undefined, clientSecret: "" };
+		expect(problems({ ...valid, auth })).toEqual([]);
+		expect(problems({ ...valid, auth: { type: "jwtBearer", username: 42 } })).toEqual([
+			"auth.username: must be a string, got 42.",
+		]);
+		// sfCli's targetOrg follows the same rules: resolveAuth reports it when it is still empty.
+		expect(problems({ ...valid, auth: { type: "sfCli", targetOrg: undefined } })).toEqual([]);
+		expect(problems({ ...valid, auth: { type: "sfCli", targetOrg: 42 } })).toEqual([
+			"auth.targetOrg: must be a string, got 42.",
+		]);
+	});
+
+	it("rejects a credential and its deprecated *Env key together", () => {
+		expect(problems({ ...valid, auth: { type: "clientCredentials", clientId: "id", clientIdEnv: "ID" } })).toEqual([
+			"auth.clientIdEnv: use either clientId or clientIdEnv, not both.",
 		]);
 	});
 

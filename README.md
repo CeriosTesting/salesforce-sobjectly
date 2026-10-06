@@ -54,11 +54,18 @@ export default defineConfig({
 	apiVersion: "v66.0",
 	output: "src/generated/sobjects.ts",
 	sobjects: ["Account", "Contact", "Case", "User"],
-	// Reads SF_LOGIN_URL, SF_CLIENT_ID and SF_CLIENT_SECRET from the environment.
-	auth: { type: "clientCredentials" },
+	// Fill these in from process.env (any variable names), a secret store or elsewhere.
+	auth: {
+		type: "clientCredentials",
+		loginUrl: process.env.SF_LOGIN_URL,
+		clientId: process.env.SF_CLIENT_ID,
+		clientSecret: process.env.SF_CLIENT_SECRET,
+	},
 	picklists: "union",
 });
 ```
+
+The variable names are only suggestions; use whatever names your environment already has. A JSON config uses `"${NAME}"` placeholders instead. See [Auth](docs/codegen.md#auth) for every login method.
 
 ### 2. Generate types for your org
 
@@ -79,6 +86,7 @@ const sf = new SalesforceClient<SObjectRegistry>({
 		clientId: process.env.SF_CLIENT_ID!,
 		clientSecret: process.env.SF_CLIENT_SECRET!,
 	}),
+	// or reuse the config's auth: auth: await loadAuth() from "@cerios/salesforce-sobjectly/codegen"
 });
 
 // CRUD

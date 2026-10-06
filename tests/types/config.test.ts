@@ -69,6 +69,28 @@ describe("defineConfig", () => {
 		});
 	});
 
+	it("takes credential values from anywhere, such as process.env", () => {
+		const config = defineConfig({
+			apiVersion: "v66.0",
+			output: "x.ts",
+			auth: {
+				type: "clientCredentials",
+				loginUrl: process.env.ACME_LOGIN_URL,
+				clientId: "${ACME_CLIENT_ID}",
+				clientSecret: process.env.ACME_CLIENT_SECRET,
+			},
+		});
+		expect(config.auth).toMatchObject({ type: "clientCredentials", clientId: "${ACME_CLIENT_ID}" });
+		defineConfig({
+			apiVersion: "v66.0",
+			output: "x.ts",
+			// @ts-expect-error credentials are strings
+			auth: { type: "jwtBearer", username: 123 },
+		});
+		// The deprecated *Env keys still compile.
+		defineConfig({ apiVersion: "v66.0", output: "x.ts", auth: { type: "accessToken", accessTokenEnv: "MY_TOKEN" } });
+	});
+
 	it("accepts auth providers, a format hook and a transport", () => {
 		const config = defineConfig({
 			apiVersion: "v66.0",
@@ -84,7 +106,7 @@ describe("defineConfig", () => {
 			$schema: "./node_modules/@cerios/salesforce-sobjectly/sobjectly.config.schema.json",
 			apiVersion: "v66.0",
 			output: "x.ts",
-			auth: { type: "clientCredentials" },
+			auth: { type: "clientCredentials", clientId: "${SF_CLIENT_ID}" },
 		};
 		expect(json.apiVersion).toBe("v66.0");
 		// @ts-expect-error functions cannot be expressed in JSON

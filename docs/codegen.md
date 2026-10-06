@@ -25,13 +25,13 @@ npx sobjectly init
 1. **API version** (required, no default). Enter e.g. `v66.0` or just `66`. Your org lists its versions at `https://<my-domain>.my.salesforce.com/services/data/`.
 2. **Output file** for the generated types (suggested: `src/generated/sobjects.ts`).
 3. **sObjects**: comma-separated API names, e.g. `Account, Contact, My_Object__c`.
-4. **Login method**: client credentials, access token or JWT bearer.
+4. **Login method**: client credentials, a Salesforce CLI org, an access token or JWT bearer. The config gets an [`auth`](#auth) object with one key per credential, read from `process.env` (TypeScript) or `"${NAME}"` placeholders (JSON). The suggested `SF_*` names are only a starting point; rename them to whatever your environment uses.
 5. **Picklist typing**: unions of values, a named constant or enum per picklist, or plain strings.
 6. **Config format**: TypeScript (`sobjectly.config.ts`) or JSON (`sobjectly.config.json`).
 
 Then it offers to:
 
-- add the credential variables for your login method to `.env.example`;
+- add the variables the config reads to `.env.example`;
 - add a `sobjects:generate` script to `package.json`.
 
 It prints the next steps when done. If a config already exists, `init` asks before replacing it. When you switch formats, the old file is removed, so only one config remains.
@@ -42,7 +42,7 @@ For scripts and CI, pass answers as flags. `--yes` accepts the suggestions for e
 npx sobjectly init --yes --api-version v66.0 --sobjects "Account,Contact" --auth clientCredentials
 ```
 
-Other flags: `--output`, `--picklists union|string`, `--format ts|json`, `--force`.
+Other flags: `--output`, `--target-org <alias>` (with `--auth sfCli`), `--picklists union|string|const|enum`, `--format ts|json`, `--force`.
 
 ## Config
 
@@ -62,8 +62,8 @@ Invalid sobjectly config (/app/sobjectly.config.json):
 `defineConfig` gives autocomplete and compile-time checks:
 
 - `apiVersion` must look like `"v66.0"`;
-- `auth` must be a known type, with only that type's options;
-- `picklists` must be `"union"` or `"string"`;
+- `auth` must be a known type, with only that type's options. Credentials are strings, and `process.env.NAME` (`string | undefined`) is accepted;
+- `picklists` must be `"union"`, `"string"`, `"const"` or `"enum"`;
 - unknown options are errors.
 
 The listed `sobjects` also become a type, so a typo in a per-sObject option is a compile error:
@@ -75,7 +75,12 @@ export default defineConfig({
 	output: "src/generated/sobjects.ts",
 	apiVersion: "v66.0",
 	sobjects: ["Account", "Contact", "Case", "Opportunity", "User", "My_Object__c"],
-	auth: { type: "clientCredentials" },
+	auth: {
+		type: "clientCredentials",
+		loginUrl: process.env.SF_LOGIN_URL,
+		clientId: process.env.SF_CLIENT_ID,
+		clientSecret: process.env.SF_CLIENT_SECRET,
+	},
 	excludeCreateFields: {
 		// Fields that describe calls createable but that the REST API rejects in your org
 		Account: ["PersonMailingAddress"],
@@ -103,12 +108,17 @@ Three things only work in a TypeScript config: an `AuthProvider` object as `auth
 	"apiVersion": "v66.0",
 	"output": "src/generated/sobjects.ts",
 	"sobjects": ["Account", "Contact", "Case"],
-	"auth": { "type": "clientCredentials" },
+	"auth": {
+		"type": "clientCredentials",
+		"loginUrl": "${SF_LOGIN_URL}",
+		"clientId": "${SF_CLIENT_ID}",
+		"clientSecret": "${SF_CLIENT_SECRET}"
+	},
 	"picklists": "union"
 }
 ```
 
-The package ships `sobjectly.config.schema.json`. The `$schema` line gives VS Code and other editors autocomplete, descriptions and inline errors. JSON configs support every option except `format`, `transport` and auth providers; use env-based `auth` instead.
+The package ships `sobjectly.config.schema.json`. The `$schema` line gives VS Code and other editors autocomplete, descriptions and inline errors. JSON configs support every option except `format`, `transport` and auth providers. Use an [auth setting](#auth) with `"${NAME}"` placeholders instead.
 
 ### Options
 
@@ -118,7 +128,7 @@ The package ships `sobjectly.config.schema.json`. The `$schema` line gives VS Co
 | `apiVersion`              | (required)                       | The API version, e.g. `"v66.0"`. Exported as `API_VERSION` (see below).                                                                     |
 | `sobjects`                | every queryable sObject          | sObjects to generate. **Set this.** An org can have thousands of sObjects. Names are matched case-insensitively; an empty list is an error. |
 | `exclude`                 | `[]`                             | sObjects to skip.                                                                                                                           |
-| `auth`                    | client credentials from env      | An env-based auth setting (see below) or any `AuthProvider`.                                                                                |
+| `auth`                    | client credentials from `SF_*`   | An auth setting with your credentials (see [Auth](#auth)) or any `AuthProvider`.                                                            |
 | `excludeCreateFields`     | `{}`                             | Per-sObject fields to drop from the create input.                                                                                           |
 | `excludeUpdateFields`     | `{}`                             | Per-sObject fields to drop from the update input.                                                                                           |
 | `picklists`               | `"union"`                        | `"union"`, `"string"`, `"const"` or `"enum"` (see [Picklists](#picklists)).                                                                 |
@@ -131,14 +141,49 @@ The package ships `sobjectly.config.schema.json`. The `$schema` line gives VS Co
 
 ### Auth
 
-| `type`              | Credentials                                                                                                            |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `sfCli`             | An org you're logged into with the Salesforce CLI (`sf org login web`); optional `targetOrg` alias. No secrets needed. |
-| `clientCredentials` | `SF_LOGIN_URL`, `SF_CLIENT_ID`, `SF_CLIENT_SECRET`                                                                     |
-| `accessToken`       | `SF_ACCESS_TOKEN`, `SF_INSTANCE_URL`                                                                                   |
-| `jwtBearer`         | `SF_LOGIN_URL`, `SF_CLIENT_ID`, `SF_USERNAME`, `SF_PRIVATE_KEY` or `SF_PRIVATE_KEY_PATH`                               |
+`auth` picks a login method with `type` and holds its credentials. You decide where the values come from. In a TypeScript config that is usually `process.env`, with any variable names you like:
 
-Rename any variable, e.g. `{ type: "clientCredentials", clientIdEnv: "MY_APP_CLIENT_ID" }`. Keep secrets out of the config file; `--env-file .env` loads a dotenv file first.
+```ts
+auth: {
+	type: "clientCredentials",
+	loginUrl: process.env.ACME_SF_LOGIN_URL,
+	clientId: process.env.ACME_SF_CLIENT_ID,
+	clientSecret: readFileSync("/run/secrets/sf_client_secret", "utf8").trim(), // or any other source
+},
+```
+
+A JSON config can't run code, so it uses `"${NAME}"` placeholders. A value that is exactly `"${NAME}"` is read from the environment variable `NAME`:
+
+```json
+"auth": { "type": "clientCredentials", "loginUrl": "${ACME_SF_LOGIN_URL}", "clientId": "${ACME_SF_CLIENT_ID}", "clientSecret": "${ACME_SF_CLIENT_SECRET}" }
+```
+
+| `type`              | Keys (the default variable when a key is left out)                                                                                                                                              |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sfCli`             | `targetOrg`: an org you're logged into with the Salesforce CLI (`sf org login web`). Left out, the CLI's default org is used, which the CLI's own `SF_TARGET_ORG` variable can set. No secrets. |
+| `clientCredentials` | `loginUrl` (`SF_LOGIN_URL`), `clientId` (`SF_CLIENT_ID`), `clientSecret` (`SF_CLIENT_SECRET`)                                                                                                   |
+| `accessToken`       | `accessToken` (`SF_ACCESS_TOKEN`), `instanceUrl` (`SF_INSTANCE_URL`)                                                                                                                            |
+| `jwtBearer`         | `loginUrl` (`SF_LOGIN_URL`), `clientId` (`SF_CLIENT_ID`), `username` (`SF_USERNAME`), and `privateKey` (`SF_PRIVATE_KEY`, the PEM text) or `privateKeyPath` (`SF_PRIVATE_KEY_PATH`)             |
+
+How values are resolved:
+
+- **A key you set is always used.** If it ends up empty, for example because `process.env.ACME_SF_CLIENT_ID` is not set, `generate` fails. It does not fall back to `SF_CLIENT_ID`.
+- **A key you leave out** is read from its default `SF_*` variable. Without `auth`, client credentials come from `SF_LOGIN_URL`, `SF_CLIENT_ID` and `SF_CLIENT_SECRET`.
+- **JWT keys:** `privateKey` wins when it has a value; otherwise the file at `privateKeyPath` is read. Once you set either one, neither falls back to its `SF_*` variable, so a stray `SF_PRIVATE_KEY` can't override your key file.
+- **Every missing credential is reported at once**, with where it was expected to come from.
+
+Keep secrets out of the config file. `--env-file .env` loads a dotenv file before the config is read, so `process.env` and `"${NAME}"` both see its values.
+
+**Deprecated: `*Env` keys.** Keys such as `clientIdEnv: "MY_CLIENT_ID"` still work in 1.x, but print a warning and will be removed in 2.0. Replace them with the value itself:
+
+```ts
+auth: { type: "clientCredentials", clientIdEnv: "MY_CLIENT_ID" },       // before
+auth: { type: "clientCredentials", clientId: process.env.MY_CLIENT_ID }, // after (TypeScript)
+```
+
+In JSON, use `"clientId": "${MY_CLIENT_ID}"`. A key and its `*Env` variant can't be used together.
+
+The client can log in with the same setting: `auth: await loadAuth()`. See [Reuse the codegen config's auth](authentication.md#reuse-the-codegen-configs-auth).
 
 ## API version
 
@@ -188,7 +233,7 @@ Prettier, oxfmt and the `format` hook keep these comments, so a reformatted file
 
 **Older files.** Files written before these header lines existed are compared with whitespace, quote style, semicolons and commas ignored.
 
-`--check` still calls the describe API, so CI needs credentials, e.g. client credentials from secrets.
+`--check` still calls the describe API, so CI needs credentials. For example, expose client credentials from your CI secrets as environment variables with the names your config reads.
 
 The file is written atomically (to a temp file, then renamed), and the output is deterministic: sObjects and fields are sorted and `Id` comes first. That keeps diffs readable. Commit the generated file and re-run the generator when the org's schema changes.
 
@@ -202,6 +247,8 @@ const { source } = await generate(config, { write: false }); // don't write, jus
 const check = await checkGenerated(config); // { upToDate, reason, added, removed, changed }
 const source = generateSource(describes, { picklists: "string" }); // pure: describes in, source out
 ```
+
+`generate` and `checkGenerated` read `"${NAME}"` placeholders and the default `SF_*` variables from `process.env`. Pass `env` to use another source, e.g. `generate(config, { env: secrets })`. To get the auth provider by itself, call `resolveAuth(config.auth, process.env)`, or `await loadAuth()` to find and load the config file first. Both throw one error listing every missing credential.
 
 ## Type mapping
 

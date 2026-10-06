@@ -6,6 +6,7 @@ import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { normalizeApiVersion } from "../../src/api-version";
+import { resolveAuth } from "../../src/codegen/index";
 import { renderConfig, runInit } from "../../src/codegen/init";
 import { loadConfig } from "../../src/codegen/load-config";
 import { type Choice, type Prompter, readlinePrompter } from "../../src/codegen/prompter";
@@ -149,8 +150,14 @@ describe("runInit", () => {
 				output: "src/generated/sobjects.ts",
 				// The sObjects to generate types for.
 				sobjects: ["Account", "Contact"],
-				// Reads SF_LOGIN_URL, SF_CLIENT_ID, SF_USERNAME and SF_PRIVATE_KEY_PATH from the environment.
-				auth: { type: "jwtBearer" },
+				// Fill these in from process.env (any variable names), a secret store or elsewhere. Keep secrets out of this file.
+				auth: {
+					type: "jwtBearer",
+					loginUrl: process.env.SF_LOGIN_URL,
+					clientId: process.env.SF_CLIENT_ID,
+					username: process.env.SF_USERNAME,
+					privateKeyPath: process.env.SF_PRIVATE_KEY_PATH,
+				},
 				picklists: "union",
 			});
 			"
@@ -181,11 +188,14 @@ describe("runInit", () => {
 			apiVersion: "v67.0",
 			output: "src/generated/sobjects.ts",
 			sobjects: ["Account", "Contact"],
-			auth: { type: "accessToken" },
+			auth: { type: "accessToken", accessToken: "${SF_ACCESS_TOKEN}", instanceUrl: "${SF_INSTANCE_URL}" },
 			picklists: "union",
 		});
 		const { config } = await loadConfig(join(cwd, "sobjectly.config.json"));
 		expect(config.apiVersion).toBe("v67.0");
+		expect(() =>
+			resolveAuth(config.auth, { SF_ACCESS_TOKEN: "T", SF_INSTANCE_URL: "https://x.my.salesforce.com" }),
+		).not.toThrow();
 		expect(readFileSync(join(cwd, ".env.example"), "utf8")).toContain("SF_ACCESS_TOKEN=\nSF_INSTANCE_URL=\n");
 	});
 
