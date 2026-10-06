@@ -104,8 +104,8 @@
 			"description": "Per sObject, fields to leave out of the update input."
 		},
 		"picklists": {
-			"enum": ["union", "string"],
-			"description": "\"union\" (default): picklists become unions of their values. \"string\": plain strings."
+			"enum": ["union", "string", "const", "enum"],
+			"description": "\"union\" (default): picklists become unions of their values. \"string\": plain strings. \"const\": a union plus a named const object and type per picklist, e.g. CaseStatus.Working. \"enum\": a TypeScript enum per picklist; restricted picklists then only accept enum members."
 		},
 		"constants": {
 			"type": "boolean",

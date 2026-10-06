@@ -22,7 +22,7 @@ export const AUTH_OPTIONS: Record<EnvAuth["type"], readonly string[]> = {
 	sfCli: ["targetOrg"],
 };
 
-export const PICKLIST_MODES = ["union", "string"] as const;
+export const PICKLIST_MODES = ["union", "string", "const", "enum"] as const;
 
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_]*$/;
 
@@ -61,7 +61,7 @@ const VALIDATORS: Record<string, Validator> = {
 	excludeUpdateFields: (value, context) => validateFieldMap("excludeUpdateFields", value, context),
 	picklists: (value, { problem }) => {
 		if (!PICKLIST_MODES.includes(value as (typeof PICKLIST_MODES)[number])) {
-			problem(`picklists: must be "union" or "string", got ${show(value)}.`);
+			problem(`picklists: must be one of ${PICKLIST_MODES.join(", ")}, got ${show(value)}.`);
 		}
 	},
 	constants: (value, { problem }) => {

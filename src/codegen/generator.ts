@@ -4,7 +4,9 @@ import type { ApiVersion } from "../types/common";
 import type { ChildRelationship, RecordTypeInfo } from "../types/describe";
 
 import type { PicklistMode } from "./config";
-import { ADDRESS_TYPE, type CodegenField, GEOLOCATION_TYPE, mapFieldType } from "./type-mapper";
+import { compare, escapeComment, IDENTIFIER, propertyKey, sortedFields } from "./emit";
+import { isNamedPicklistMode, picklistDeclarations, picklistTypeNames } from "./picklist-types";
+import { activePicklistValues, ADDRESS_TYPE, type CodegenField, GEOLOCATION_TYPE, mapFieldType } from "./type-mapper";
 
 /** The subset of an sObject describe the generator needs. */
 export interface CodegenDescribe {
@@ -29,26 +31,29 @@ export interface GenerateSourceOptions {
 /** Field types whose kind is recorded in the registry's `fieldKinds`. */
 const FIELD_KINDS = new Set(["date", "datetime", "time", "multipicklist"]);
 
-const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
-
 /**
  * Generates the TypeScript source for a set of sObject describes: a read interface, create
- * and update input types per sObject, and the `SObjectRegistry` that ties them together.
+ * and update input types per sObject, and the `SObjectRegistry` that ties them together. With
+ * picklist mode `"const"` or `"enum"`, each picklist also gets a named type before its sObject.
  * The output is deterministic: sObjects are sorted by name and fields by name (`Id` first).
  */
 export function generateSource(describes: readonly CodegenDescribe[], options: GenerateSourceOptions = {}): string {
 	const sorted = [...describes].sort((a, b) => compare(a.name, b.name));
-	assertGeneratableNames(sorted);
+	const definedNames = assertGeneratableNames(sorted);
 	const names = new Set(sorted.map((describe) => describe.name));
+	const picklists = options.picklists ?? "union";
+	const picklistTypes = isNamedPicklistMode(picklists) ? picklistTypeNames(sorted, definedNames) : undefined;
 	const sections = [imports(sorted, options.importSource ?? "@cerios/salesforce-sobjectly")];
 	const objectHashes: string[] = [];
 
 	for (const describe of sorted) {
+		const typeNames = picklistTypes?.get(describe.name);
 		const objectSections = [
-			readInterface(describe, options.picklists ?? "union"),
+			isNamedPicklistMode(picklists) ? picklistDeclarations(describe, typeNames, picklists) : "",
+			readInterface(describe, picklists, typeNames),
 			inputType(describe, "CreateInput", "createable", lookup(options.excludeCreateFields, describe.name)),
 			inputType(describe, "UpdateInput", "updateable", lookup(options.excludeUpdateFields, describe.name)),
-		];
+		].filter((section) => section.length > 0);
 		sections.push(...objectSections);
 		const fingerprint = [
 			...objectSections,
@@ -81,8 +86,11 @@ const RESERVED_TYPE_NAMES = new Set([
 	GEOLOCATION_TYPE,
 ]);
 
-/** Fails with a clear message for sObject names the generated TypeScript can't represent. */
-function assertGeneratableNames(describes: readonly CodegenDescribe[]): void {
+/**
+ * Fails with a clear message for sObject names the generated TypeScript can't represent. Returns
+ * every name the file defines apart from picklist types, so those can avoid them.
+ */
+function assertGeneratableNames(describes: readonly CodegenDescribe[]): Set<string> {
 	const seen = new Map<string, string>();
 	const generated = new Set(
 		describes.flatMap((describe) => [`${describe.name}CreateInput`, `${describe.name}UpdateInput`]),
@@ -100,6 +108,7 @@ function assertGeneratableNames(describes: readonly CodegenDescribe[]): void {
 		}
 		seen.set(name.toLowerCase(), name);
 	}
+	return new Set([...RESERVED_TYPE_NAMES, ...generated, ...describes.map((describe) => describe.name)]);
 }
 
 /** Looks up a per-sObject option case-insensitively (sObject names are case-insensitive in Salesforce). */
@@ -169,14 +178,15 @@ function imports(describes: readonly CodegenDescribe[], importSource: string): s
 	return used.length > 0 ? `import type { ${used.join(", ")} } from ${JSON.stringify(importSource)};` : "";
 }
 
-function sortedFields(describe: CodegenDescribe): CodegenField[] {
-	return [...describe.fields].sort((a, b) => (a.name === "Id" ? -1 : b.name === "Id" ? 1 : compare(a.name, b.name)));
-}
-
-function readInterface(describe: CodegenDescribe, picklists: PicklistMode): string {
+function readInterface(
+	describe: CodegenDescribe,
+	picklists: PicklistMode,
+	typeNames: ReadonlyMap<string, string> | undefined,
+): string {
 	const lines = sortedFields(describe).map((field) => {
 		const comment = `\t/** ${escapeComment(field.label)} (${escapeComment(field.type)}) */`;
-		return `${comment}\n\t${propertyKey(field.name)}: ${mapFieldType(field, picklists)};`;
+		const type = mapFieldType(field, picklists, typeNames?.get(field.name));
+		return `${comment}\n\t${propertyKey(field.name)}: ${type};`;
 	});
 	const doc = describe.label ? `/** ${escapeComment(describe.label)} */\n` : "";
 	return `${doc}export interface ${describe.name} {\n${lines.join("\n")}\n}`;
@@ -325,13 +335,6 @@ function recordTypeConstants(describes: readonly CodegenDescribe[]): string {
 	].join("\n");
 }
 
-function activePicklistValues(field: CodegenField): string[] {
-	if (field.type !== "picklist" && field.type !== "multipicklist" && field.type !== "combobox") {
-		return [];
-	}
-	return [...new Set((field.picklistValues ?? []).filter((entry) => entry.active).map((entry) => entry.value))];
-}
-
 function unionOrNever(values: readonly string[]): string {
 	return values.length > 0 ? values.map((value) => JSON.stringify(value)).join(" | ") : "never";
 }
@@ -367,18 +370,4 @@ function relationshipMap(entries: readonly (readonly [string, string])[]): strin
 
 function keyUnion(names: readonly string[]): string {
 	return names.map((name) => JSON.stringify(name)).join(" | ");
-}
-
-function propertyKey(name: string): string {
-	return IDENTIFIER.test(name) ? name : JSON.stringify(name);
-}
-
-function escapeComment(value: string | null | undefined): string {
-	return String(value ?? "")
-		.replace(/\*\//g, "*\\/")
-		.replace(/\r?\n/g, " ");
-}
-
-function compare(a: string, b: string): number {
-	return a < b ? -1 : a > b ? 1 : 0;
 }

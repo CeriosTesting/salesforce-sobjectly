@@ -54,7 +54,18 @@ export type PicklistMode =
 	/** Every picklist is `string`. */
 	| "string"
 	/** Restricted picklists become a union of their values; unrestricted ones `"A" | "B" | (string & {})`. */
-	| "union";
+	| "union"
+	/**
+	 * Like `"union"`, plus a named `as const` object and type per picklist: `CaseStatus.Working`,
+	 * `Status: CaseStatus`. Plain strings such as `"Working"` are still accepted.
+	 */
+	| "const"
+	/**
+	 * A TypeScript `enum` per picklist: `CaseStatus.Working`, `Status: CaseStatus`. Enums are nominal,
+	 * so restricted picklists only accept enum members, not plain strings. Not usable with
+	 * `erasableSyntaxOnly` or Node's type stripping.
+	 */
+	| "enum";
 
 /**
  * The codegen config. `S` is the union of the listed sObject names; `defineConfig` infers it, so

@@ -8,6 +8,7 @@ import { normalizeApiVersion } from "./api-version";
 import { checkGenerated, findConfigFiles, generate, loadConfig } from "./codegen/index";
 import { type InitAnswers, parseSObjects, runInit } from "./codegen/init";
 import { readlinePrompter } from "./codegen/prompter";
+import { PICKLIST_MODES } from "./codegen/validate-config";
 
 const HELP = `Usage: sobjectly <command> [options]
 
@@ -28,7 +29,7 @@ Options for init (skip the matching questions; useful in scripts):
       --sobjects <list>     Comma-separated sObject API names
       --auth <type>         clientCredentials | sfCli | accessToken | jwtBearer
       --target-org <alias>  Salesforce CLI org alias (with --auth sfCli)
-      --picklists <mode>    union | string
+      --picklists <mode>    union | string | const | enum
       --format <format>     ts | json
   -y, --yes                 Use the suggested answer for every other question (needs --api-version)
   -f, --force               Replace an existing config without asking
@@ -124,7 +125,7 @@ function initPreset(values: Values): Partial<InitAnswers> {
 	if (values["target-org"] !== undefined) {
 		preset.targetOrg = values["target-org"];
 	}
-	const picklists = oneOf("--picklists", values.picklists, ["union", "string"] as const);
+	const picklists = oneOf("--picklists", values.picklists, PICKLIST_MODES);
 	const format = oneOf("--format", values.format, ["ts", "json"] as const);
 	return { ...preset, ...(auth && { auth }), ...(picklists && { picklists }), ...(format && { format }) };
 }

@@ -122,6 +122,9 @@ const runCommand: RunCommand = (command, args) =>
 		const [file, fileArgs] = windows
 			? ["cmd.exe", ["/d", "/s", "/c", `"${[command, ...args].map(quoteForCmd).join(" ")}"`]]
 			: [command, [...args]];
+		// With FORCE_COLOR (set by e.g. the Vitest VS Code extension) the CLI colors its `--json` output.
+		const env: NodeJS.ProcessEnv = { ...process.env, SF_JSON_TO_STDOUT: "true", NO_COLOR: "1" };
+		delete env.FORCE_COLOR;
 		execFile(
 			file,
 			fileArgs,
@@ -129,7 +132,7 @@ const runCommand: RunCommand = (command, args) =>
 				windowsHide: true,
 				windowsVerbatimArguments: windows,
 				maxBuffer: 10 * 1024 * 1024,
-				env: { ...process.env, SF_JSON_TO_STDOUT: "true" },
+				env,
 			},
 			(error, stdout, stderr) => {
 				if (

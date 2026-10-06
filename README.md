@@ -9,7 +9,7 @@ A type-safe Salesforce REST API client for TypeScript. It generates types for yo
 
 ## ✨ Key Features
 
-- **Generated sObject types**: `sobjectly generate` reads describe metadata and writes a read type, a create input and an update input for every sObject. Required fields, restricted picklists and relationships all come from your org.
+- **Generated sObject types**: `sobjectly generate` reads describe metadata and writes a read type, a create input and an update input for every sObject. Required fields, restricted picklists and relationships all come from your org. Picklists can also become named constants or enums, e.g. `CaseStatus.Working`.
 - **Typed SOQL builder**: field names are checked and autocompleted. The query result only contains the fields you selected, so `record.Phone` is a compile error unless you selected `Phone`.
 - **Relationship queries**: `selectRelated("Account", "Name")` and `selectChild("Contacts", c => c.select("Email"))` produce typed nested results.
 - **The whole REST API**: sObject CRUD, upsert by external id, query and queryAll with pagination, SOSL, Composite, Composite Graph, sObject Tree, sObject Collections, invocable actions and Flows, the Tooling API, Apex REST and Bulk API 2.0. Anything else is reachable through `request<T>()`.

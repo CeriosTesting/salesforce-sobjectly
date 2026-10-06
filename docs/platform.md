@@ -17,7 +17,7 @@ const statuses = await sf.sobject("Case").picklistValues("Status", { recordType:
 
 Describe results are cached per client, so repeated lookups cost nothing. `sf.clearCache()` empties the cache, and `new SalesforceClient({ cache: false })` turns it off.
 
-The generated file also exports `RECORD_TYPES` and `PICKLIST_VALUES` constants, for looping in tests without an API call.
+The generated file also exports `RECORD_TYPES` and `PICKLIST_VALUES` constants, for looping in tests without an API call. With `picklists: "const"` or `"enum"`, each picklist also gets a named constant such as `CaseStatus.Working` (see the [codegen guide](./codegen.md#picklists)).
 
 ## Platform events
 

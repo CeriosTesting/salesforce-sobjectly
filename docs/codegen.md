@@ -10,6 +10,7 @@
   - `externalIds`: the fields upsert accepts;
   - `fieldKinds`: date, datetime, time and multipicklist fields, so `where()` can check values;
   - `recordTypes`: record type DeveloperNames.
+- with `picklists: "const"` or `"enum"`, a **named type per picklist** (`CaseStatus`), declared before its sObject;
 - **`PICKLIST_VALUES`** and **`RECORD_TYPES`**: runtime constants, e.g. to loop over every status in a test. Turn them off with `constants: false`;
 - **`API_VERSION`**: the version the types were generated with.
 
@@ -25,7 +26,7 @@ npx sobjectly init
 2. **Output file** for the generated types (suggested: `src/generated/sobjects.ts`).
 3. **sObjects**: comma-separated API names, e.g. `Account, Contact, My_Object__c`.
 4. **Login method**: client credentials, access token or JWT bearer.
-5. **Picklist typing**: unions of values, or plain strings.
+5. **Picklist typing**: unions of values, a named constant or enum per picklist, or plain strings.
 6. **Config format**: TypeScript (`sobjectly.config.ts`) or JSON (`sobjectly.config.json`).
 
 Then it offers to:
@@ -120,7 +121,7 @@ The package ships `sobjectly.config.schema.json`. The `$schema` line gives VS Co
 | `auth`                    | client credentials from env      | An env-based auth setting (see below) or any `AuthProvider`.                                                                                |
 | `excludeCreateFields`     | `{}`                             | Per-sObject fields to drop from the create input.                                                                                           |
 | `excludeUpdateFields`     | `{}`                             | Per-sObject fields to drop from the update input.                                                                                           |
-| `picklists`               | `"union"`                        | `"union"` or `"string"` (see below).                                                                                                        |
+| `picklists`               | `"union"`                        | `"union"`, `"string"`, `"const"` or `"enum"` (see [Picklists](#picklists)).                                                                 |
 | `constants`               | `true`                           | Emit the `PICKLIST_VALUES` and `RECORD_TYPES` runtime constants.                                                                            |
 | `concurrency`             | `10`                             | Parallel describe calls.                                                                                                                    |
 | `continueOnDescribeError` | `false`                          | Skip sObjects whose describe fails instead of aborting.                                                                                     |
@@ -204,30 +205,84 @@ const source = generateSource(describes, { picklists: "string" }); // pure: desc
 
 ## Type mapping
 
-| Salesforce type                                                                               | TypeScript                      |
-| --------------------------------------------------------------------------------------------- | ------------------------------- |
-| `boolean`                                                                                     | `boolean`                       |
-| `int`, `long`, `double`, `currency`, `percent`                                                | `number`                        |
-| `date`                                                                                        | `string` (`yyyy-MM-dd`)         |
-| `datetime`                                                                                    | `string` (ISO 8601)             |
-| `time`                                                                                        | `string` (`HH:mm:ss.SSSZ`)      |
-| `id`, `reference`, `string`, `textarea`, `email`, `phone`, `url`, `encryptedstring`, `base64` | `string`                        |
-| `picklist`, `combobox`                                                                        | union or `string` (below)       |
-| `multipicklist`                                                                               | `string` (values joined by `;`) |
-| `address`                                                                                     | `SalesforceAddress`             |
-| `location`                                                                                    | `SalesforceGeolocation`         |
-| anything else (`anyType`, `complexvalue`, new types)                                          | `unknown`                       |
+| Salesforce type                                                                               | TypeScript                            |
+| --------------------------------------------------------------------------------------------- | ------------------------------------- |
+| `boolean`                                                                                     | `boolean`                             |
+| `int`, `long`, `double`, `currency`, `percent`                                                | `number`                              |
+| `date`                                                                                        | `string` (`yyyy-MM-dd`)               |
+| `datetime`                                                                                    | `string` (ISO 8601)                   |
+| `time`                                                                                        | `string` (`HH:mm:ss.SSSZ`)            |
+| `id`, `reference`, `string`, `textarea`, `email`, `phone`, `url`, `encryptedstring`, `base64` | `string`                              |
+| `picklist`, `combobox`                                                                        | union, named type or `string` (below) |
+| `multipicklist`                                                                               | `string` (values joined by `;`)       |
+| `address`                                                                                     | `SalesforceAddress`                   |
+| `location`                                                                                    | `SalesforceGeolocation`               |
+| anything else (`anyType`, `complexvalue`, new types)                                          | `unknown`                             |
 
 Dates and date-times stay strings because that is what the REST API returns. Convert them with `new Date(value)` where needed.
 
 ### Picklists
 
-With `picklists: "union"` (the default):
+The `picklists` option sets how picklist and combobox fields are typed:
 
-- **Restricted picklists** become a strict union of their active values: `"New" | "Working" | "Closed"`. An invalid value is a compile error.
+| Mode                | `Case.Status` is                 | Also emits                                    |
+| ------------------- | -------------------------------- | --------------------------------------------- |
+| `"union"` (default) | `"New" \| "Working" \| "Closed"` | nothing                                       |
+| `"const"`           | `CaseStatus`, the same union     | `CaseStatus` as an `as const` object and type |
+| `"enum"`            | `CaseStatus`, a TypeScript enum  | `export enum CaseStatus`                      |
+| `"string"`          | `string`                         | nothing                                       |
+
+In every mode except `"string"`:
+
+- **Restricted picklists** only accept their active values: `"New" | "Working" | "Closed"`. An invalid value is a compile error.
 - **Unrestricted picklists** and comboboxes become `"A" | "B" | (string & {})`. You get autocomplete, and any other string is still accepted.
 
-Values can differ per record type; the union covers all of them. Use `picklists: "string"` to turn this off.
+Values can differ per record type; the type covers all of them.
+
+#### Named picklist types: `"const"` and `"enum"`
+
+With `picklists: "const"`, every picklist gets an `as const` object and a type of the same name, declared before its sObject:
+
+```ts
+/** Active values of Case.Status (picklist). */
+export const CaseStatus = {
+	New: "New",
+	Working: "Working",
+	Closed: "Closed",
+} as const;
+export type CaseStatus = (typeof CaseStatus)[keyof typeof CaseStatus];
+
+export interface Case {
+	Status: CaseStatus;
+	// ...
+}
+```
+
+`CaseStatus` is the same union as in `"union"` mode, so plain strings keep working next to the members:
+
+```ts
+sf.soql("Case").where("Status", "=", CaseStatus.Working);
+sf.soql("Case").where("Status", "=", "Working"); // also fine
+```
+
+With `picklists: "enum"`, every picklist gets a TypeScript `enum` instead: `export enum CaseStatus { New = "New", ... }`. Enums are nominal, so a restricted picklist then only accepts enum members: `where("Status", "=", "Working")` and `create({ Status: "Working" })` become compile errors. Enums also don't work with `erasableSyntaxOnly` or Node's type stripping. Prefer `"const"` unless you specifically want enums.
+
+Multi-select picklists get a named type too, for building values. The field itself stays a `string` (values joined by `;`).
+
+**Type names** are the sObject name followed by the field name, in PascalCase without underscores:
+
+| Field                 | Type name              |
+| --------------------- | ---------------------- |
+| `Case.Status`         | `CaseStatus`           |
+| `Case.Status__c`      | `CaseStatusCustom`     |
+| `Case.Lead_Source__c` | `CaseLeadSourceCustom` |
+| `Project__c.Stage__c` | `ProjectStageCustom`   |
+
+A custom field's `__c` becomes `Custom`, so `Status` and `Status__c` on the same sObject get different names. A custom sObject's `__c` is dropped.
+
+When a name is already taken, `Picklist` is appended. Standard sObjects such as `CaseStatus`, `TaskStatus` and `LeadStatus` cause this: if you also generate the `CaseStatus` sObject, the type for `Case.Status` is `CaseStatusPicklist`. If that name is taken as well, generation fails; exclude one of the sObjects.
+
+**Member names** are the values themselves when those are valid identifiers (`New`). Other values are cleaned up: `"Closed Won"` becomes `Closed_Won`, `"Proposal/Price Quote"` becomes `Proposal_Price_Quote` and `"3rd Party"` becomes `_3rd_Party`. When that leaves nothing, or another member already has the name, the value is used as a quoted key: `CaseStatus["Closed-Won"]`. The values themselves are never changed.
 
 ## Relationships
 
