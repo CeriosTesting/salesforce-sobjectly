@@ -1,5 +1,20 @@
 # @cerios/salesforce-sobjectly
 
+## 1.1.0
+
+### Minor Changes
+
+- 0bbbc3c: Named picklist types. Two new `picklists` modes give every picklist a named type, e.g. `CaseStatus.Working` and `Status: CaseStatus`:
+  
+  - `picklists: "const"`: an `as const` object plus a type of the same name. The type is the same union as before, so plain strings keep working.
+  - `picklists: "enum"`: a TypeScript `enum`. Restricted picklists then only accept enum members.
+  
+  Type names are the sObject and field in PascalCase (`Case.Status__c` → `CaseStatusCustom`). A name that clashes with a generated sObject, such as `CaseStatus`, gets the suffix `Picklist`. The default stays `"union"`, and its output is unchanged.
+
+### Patch Changes
+
+- 8110610: `sfCli()` now works when `FORCE_COLOR` is set, for example in tests run by the Vitest VS Code extension. The Salesforce CLI colored its `--json` output, so the login failed with "did not return JSON". The CLI now runs with colors turned off.
+
 ## 1.0.0
 
 ### Major Changes
