@@ -1,5 +1,13 @@
 # @cerios/salesforce-sobjectly
 
+## 1.2.0
+
+### Minor Changes
+
+- 2e24744: The codegen `auth` setting now holds the credentials themselves, so you choose where they come from: `clientId: process.env.ANY_NAME` in a TypeScript config, or a `"${ANY_NAME}"` placeholder in JSON. `sfCli`'s `targetOrg` takes the same kinds of values; left out, the CLI's default org is used. `sobjectly init` writes the full object for the chosen login method. Keys you leave out still fall back to the `SF_*` variables, and every missing credential is now reported in one error. The `*Env` keys (`clientIdEnv` etc.) still work but are deprecated and print a warning; they will be removed in 2.0.
+- 0399aaa: Request hooks now receive the request body (`body`) and the response body (`responseBody`), so a hook can log calls to the console or attach them to a test report such as Allure. Hooks may return a promise; it is not awaited and a rejection is ignored.
+- 2e24744: `loadAuth()` (from `@cerios/salesforce-sobjectly/codegen`) reads your `sobjectly.config.*` and returns an auth provider for its `auth` setting, so the client logs in the same way as `sobjectly generate`: `new SalesforceClient({ apiVersion: API_VERSION, auth: await loadAuth() })`. Pass another provider to override it. Without a config file it throws an error that explains how to fix it.
+
 ## 1.1.0
 
 ### Minor Changes
