@@ -7,7 +7,7 @@ import { accessToken, tokenProvider } from "../../src/auth/providers";
 import type { AccessToken } from "../../src/auth/types";
 import { SalesforceClient } from "../../src/client";
 import { SalesforceError } from "../../src/errors";
-import { type ConnectionOptions, SalesforceConnection } from "../../src/http/connection";
+import { type ConnectionOptions, type ResponseEvent, SalesforceConnection } from "../../src/http/connection";
 import type {
 	HttpTransport,
 	StreamingTransportResponse,
@@ -296,6 +296,31 @@ describe("SalesforceConnection.stream", () => {
 			limitInfo: "api-usage=3/15000",
 		});
 		expect(transport.requests).toHaveLength(1);
+	});
+
+	it("passes the buffered error body to hooks and still throws SalesforceError", async () => {
+		const onResponse = vi.fn<(event: ResponseEvent) => void>();
+		const transport = new StreamingFakeTransport({
+			status: 404,
+			headers: { "content-type": "application/json" },
+			chunks: errorBody("NOT_FOUND", "The requested resource does not exist"),
+		});
+		await expect(
+			streamingConnection(transport, { hooks: { onResponse } }).stream({ path: "/x" }),
+		).rejects.toBeInstanceOf(SalesforceError);
+		expect(onResponse.mock.calls[0]?.[0]).toMatchObject({
+			status: 404,
+			responseBody: JSON.stringify([{ errorCode: "NOT_FOUND", message: "The requested resource does not exist" }]),
+		});
+	});
+
+	it("passes no response body to hooks for a successful stream", async () => {
+		const onResponse = vi.fn<(event: ResponseEvent) => void>();
+		const transport = new StreamingFakeTransport({ headers: { "content-type": "text/csv" }, chunks: ["Id\n1\n"] });
+		const response = await streamingConnection(transport, { hooks: { onResponse } }).stream({ path: "/x" });
+		expect(onResponse.mock.calls[0]?.[0].status).toBe(200);
+		expect(onResponse.mock.calls[0]?.[0].responseBody).toBeUndefined();
+		expect(await readText(response)).toBe("Id\n1\n");
 	});
 
 	it("retries a 503 when retries are enabled", async () => {

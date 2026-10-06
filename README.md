@@ -107,16 +107,16 @@ for await (const contact of sf.iterate(sf.soql("Contact").select("Id", "Email"))
 
 ## 📖 Documentation
 
-| Guide                                                        | What's in it                                                                                            |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| [Authentication](docs/authentication.md)                     | Salesforce CLI, access tokens, client credentials, JWT bearer, refresh tokens, custom providers         |
-| [Code generation](docs/codegen.md)                           | Config reference, type mapping, required fields, picklists, CI usage                                    |
-| [SOQL builder](docs/soql.md)                                 | Selecting, relationships, filters, aggregates, pagination, escaping                                     |
-| [Composite & collections](docs/composite-and-collections.md) | Composite with references, batch, tree, graph, sObject collections                                      |
-| [Approvals, files, reports & more](docs/platform.md)         | Record types, picklists, platform events, approvals, quick actions, UI API, files, reports, query plans |
-| [Bulk API 2.0](docs/bulk.md)                                 | Ingest jobs, query jobs, CSV handling                                                                   |
-| [Transports](docs/transports.md)                             | Custom HTTP clients (axios and Playwright examples), streaming, hooks, retries, timeouts                |
-| [Endpoint coverage](docs/endpoints.md)                       | Which Salesforce REST resources have typed helpers                                                      |
+| Guide                                                        | What's in it                                                                                                 |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| [Authentication](docs/authentication.md)                     | Salesforce CLI, access tokens, client credentials, JWT bearer, refresh tokens, custom providers              |
+| [Code generation](docs/codegen.md)                           | Config reference, type mapping, required fields, picklists, CI usage                                         |
+| [SOQL builder](docs/soql.md)                                 | Selecting, relationships, filters, aggregates, pagination, escaping                                          |
+| [Composite & collections](docs/composite-and-collections.md) | Composite with references, batch, tree, graph, sObject collections                                           |
+| [Approvals, files, reports & more](docs/platform.md)         | Record types, picklists, platform events, approvals, quick actions, UI API, files, reports, query plans      |
+| [Bulk API 2.0](docs/bulk.md)                                 | Ingest jobs, query jobs, CSV handling                                                                        |
+| [Transports](docs/transports.md)                             | Custom HTTP clients (axios and Playwright examples), streaming, hooks and request logging, retries, timeouts |
+| [Endpoint coverage](docs/endpoints.md)                       | Which Salesforce REST resources have typed helpers                                                           |
 
 ## 🧭 API Overview
 
