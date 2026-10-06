@@ -46,10 +46,4 @@ Releases use [changesets](https://github.com/changesets/changesets).
 1. Copy `.env.example` to `.env` and set `SF_API_VERSION` plus one login: client credentials, an access token, or `SF_TARGET_ORG` for an org you are logged into with the `sf` CLI. `.env` is gitignored.
 2. Run `npm run test:integration`. Without a configured org, every test is skipped.
 
-The first run deploys a few fixtures and keeps them for later runs:
-
-- a platform event `Sobjectly_Test__e`;
-- two Apex classes: the REST resource `SobjectlyEcho` and the invocable `SobjectlyDouble`;
-- a report `Sobjectly_Test_Accounts`.
-
-They are only created in Developer Edition orgs and sandboxes, or anywhere with `SF_IT_SETUP=1`. Elsewhere, the tests that need them are skipped.
+See [tests/integration/README.md](tests/integration/README.md) for the full setup: creating an org, each login step by step, what the tests change in your org, and troubleshooting.
