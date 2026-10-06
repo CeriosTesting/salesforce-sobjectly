@@ -207,6 +207,74 @@ describe("SalesforceConnection requests", () => {
 		expect(JSON.stringify([onRequest.mock.calls, onResponse.mock.calls])).not.toContain("TOKEN");
 	});
 
+	it("passes request and response bodies to hooks", async () => {
+		const onRequest = vi.fn<(event: RequestEvent) => void>();
+		const onResponse = vi.fn<(event: ResponseEvent) => void>();
+		const transport = new FakeTransport().reply({ status: 201, body: { id: "001A", success: true } });
+		await connect(transport, { hooks: { onRequest, onResponse } }).request({
+			method: "POST",
+			path: "/sobjects/Account",
+			body: { Name: "Acme" },
+		});
+		expect(onRequest.mock.calls[0]?.[0].body).toBe('{"Name":"Acme"}');
+		expect(onResponse.mock.calls[0]?.[0]).toMatchObject({
+			status: 201,
+			body: '{"Name":"Acme"}',
+			responseBody: '{"id":"001A","success":true}',
+		});
+	});
+
+	it("passes no body for empty requests and responses, and bytes for binary responses", async () => {
+		const onResponse = vi.fn<(event: ResponseEvent) => void>();
+		const bytes = new Uint8Array([1, 2, 3]);
+		const transport = new FakeTransport().reply(
+			{ status: 204 },
+			{ body: bytes, headers: { "content-type": "application/octet-stream" } },
+		);
+		const connection = connect(transport, { hooks: { onResponse } });
+		await connection.request({ method: "DELETE", path: "/sobjects/Account/001A" });
+		await connection.request({ path: "/sobjects/ContentVersion/068A/VersionData", responseType: "binary" });
+		expect(onResponse.mock.calls[0]?.[0].body).toBeUndefined();
+		expect(onResponse.mock.calls[0]?.[0].responseBody).toBeUndefined();
+		expect(onResponse.mock.calls[1]?.[0].responseBody).toEqual(bytes);
+	});
+
+	it("passes the bodies to hooks on every attempt", async () => {
+		const onResponse = vi.fn<(event: ResponseEvent) => void>();
+		const transport = new FakeTransport().reply({ status: 503, body: "busy" }, { body: { ok: true } });
+		await connect(transport, { retry: { baseDelayMs: 1 }, hooks: { onResponse } }).request({
+			method: "POST",
+			path: "/x",
+			body: { a: 1 },
+			retry: true,
+		});
+		expect(
+			onResponse.mock.calls.map(([event]) => [event.attempt, event.status, event.body, event.responseBody]),
+		).toEqual([
+			[1, 503, '{"a":1}', "busy"],
+			[2, 200, '{"a":1}', '{"ok":true}'],
+		]);
+	});
+
+	it("ignores hooks that throw or return a rejected promise", async () => {
+		const unhandled = vi.fn<(reason: unknown) => void>();
+		process.on("unhandledRejection", unhandled);
+		try {
+			const transport = new FakeTransport().reply({ body: { ok: true } });
+			const hooks = {
+				onRequest: (): never => {
+					throw new Error("sync hook failure");
+				},
+				onResponse: (): Promise<void> => Promise.reject(new Error("async hook failure")),
+			};
+			expect(await connect(transport, { hooks }).request({ path: "/x" })).toEqual({ ok: true });
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			expect(unhandled).not.toHaveBeenCalled();
+		} finally {
+			process.off("unhandledRejection", unhandled);
+		}
+	});
+
 	it("aborts on timeout and on the caller's signal", async () => {
 		const hang = (request: RecordedRequest): Promise<FakeResponse> =>
 			new Promise((_resolve, reject) => {

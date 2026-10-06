@@ -145,3 +145,75 @@ new SalesforceClient({
 - Absolute URLs (for example `nextRecordsUrl`) must be on the instance origin. Add other origins with `allowedOrigins`.
 - Redirects are not followed: `fetchTransport` uses `redirect: "manual"`, so a redirect can't bypass the origin check. A 3xx response surfaces as a `SalesforceError`.
 - A request body must be JSON-serializable, a string or bytes (`Uint8Array`, `ArrayBuffer`, typed arrays). `Blob`, `FormData` and streams are rejected; use `buildMultipart` for multipart bodies.
+
+### Logging requests and responses
+
+Hooks receive the bodies, so a hook can serve as a request logger. `onRequest` gets the request `body` as sent: JSON or form text, or bytes for binary uploads. `onResponse` gets that same request data plus the `responseBody`: text for JSON, XML, CSV and `text/*`, bytes otherwise. One `onResponse` call therefore has everything for a log entry:
+
+```ts
+new SalesforceClient({
+	auth,
+	apiVersion: "v66.0",
+	hooks: {
+		onResponse: (event) => {
+			console.log(`${event.method} ${event.url} → ${event.status} in ${event.durationMs} ms`);
+			if (typeof event.responseBody === "string") console.log(event.responseBody.slice(0, 500));
+		},
+	},
+});
+```
+
+A hook may return a promise, so async reporters fit directly. The promise is not awaited, and a rejection is ignored. For an Allure report (`allure-js-commons`), attach every call as JSON:
+
+```ts
+import * as allure from "allure-js-commons";
+import type { RequestHooks, ResponseEvent } from "@cerios/salesforce-sobjectly";
+
+function readable(body: string | Uint8Array | undefined): unknown {
+	if (typeof body !== "string") return body && `<${body.byteLength} bytes>`;
+	try {
+		return JSON.parse(body) as unknown;
+	} catch {
+		return body; // CSV, XML or plain text
+	}
+}
+
+function describeCall(event: ResponseEvent): { name: string; json: string } {
+	return {
+		name: `${event.method} ${new URL(event.url).pathname} → ${event.status}`,
+		json: JSON.stringify(
+			{
+				request: { method: event.method, url: event.url, attempt: event.attempt, body: readable(event.body) },
+				response: { status: event.status, durationMs: event.durationMs, body: readable(event.responseBody) },
+			},
+			null,
+			2,
+		),
+	};
+}
+
+export const allureHooks: RequestHooks = {
+	onResponse: (event) => {
+		const { name, json } = describeCall(event);
+		return allure.attachment(name, json, "application/json");
+	},
+};
+```
+
+In Playwright tests without Allure, attach it to the test instead:
+
+```ts
+import { test } from "@playwright/test";
+
+const playwrightHooks: RequestHooks = {
+	onResponse: (event) => {
+		const { name, json } = describeCall(event);
+		return test.info().attach(name, { body: json, contentType: "application/json" });
+	},
+};
+```
+
+- The `Authorization` header is redacted, and token requests (client credentials, JWT bearer, refresh token) never reach the hooks, so secrets can't end up in a report. `sfCli()` makes no HTTP calls at all.
+- Hooks fire once per attempt, so a retried request is logged once per try. `event.attempt` tells them apart.
+- Successful streamed responses (Bulk API query results over `fetchTransport`) have no `responseBody`, because the body hasn't been read yet when the hook fires. Error responses are buffered and do have one.
+- Bodies contain your record data. Treat reports and logs that include them accordingly.

@@ -20,4 +20,4 @@ You can expect a first response within 5 working days.
 - Absolute URLs (such as `nextRecordsUrl`) are only followed on the authenticated instance origin, unless `allowedOrigins` says otherwise.
 - `SalesforceError.path` leaves out the query string, because SOQL in a query string can contain personal data.
 - Values passed to the typed SOQL methods are escaped. Values you interpolate into `whereRaw`/`selectRaw` must be escaped with `soqlEscape`.
-- The codegen reads credentials from environment variables. Don't put secrets in `sobjectly.config.ts`.
+- The codegen config is meant to be committed, so don't write secrets into it as literals. Read them from the environment instead: `process.env.NAME` in `sobjectly.config.ts`, or a `"${NAME}"` placeholder in `sobjectly.config.json`. Error messages name the missing key or variable, never its value.

@@ -2,53 +2,93 @@ import type { AuthProvider } from "../auth/types";
 import type { HttpTransport } from "../http/transport";
 import type { ApiVersion } from "../types/common";
 
-/** Client credentials read from environment variables (defaults shown). */
-export interface EnvClientCredentialsAuth {
+/**
+ * A credential value in the config: usually `process.env.ANY_NAME` (so `undefined` type-checks),
+ * a `"${ANY_NAME}"` placeholder that is read from the environment (the way to do it in JSON), or
+ * a literal. A key that is set but ends up empty is an error; a key that is left out falls back
+ * to its default `SF_*` environment variable.
+ */
+export type ConfigValue = string | undefined;
+
+/** OAuth 2.0 client credentials. Keys you leave out are read from the default variables shown. */
+export interface ClientCredentialsAuth {
 	type: "clientCredentials";
-	/** Defaults to `SF_LOGIN_URL` (your My Domain URL). */
+	/** Your My Domain URL. Defaults to the `SF_LOGIN_URL` variable. */
+	loginUrl?: ConfigValue;
+	/** Defaults to the `SF_CLIENT_ID` variable. */
+	clientId?: ConfigValue;
+	/** Defaults to the `SF_CLIENT_SECRET` variable. */
+	clientSecret?: ConfigValue;
+	/** @deprecated Use `loginUrl: process.env.NAME` (or `"${NAME}"` in JSON). Removed in 2.0. */
 	loginUrlEnv?: string;
-	/** Defaults to `SF_CLIENT_ID`. */
+	/** @deprecated Use `clientId: process.env.NAME` (or `"${NAME}"` in JSON). Removed in 2.0. */
 	clientIdEnv?: string;
-	/** Defaults to `SF_CLIENT_SECRET`. */
+	/** @deprecated Use `clientSecret: process.env.NAME` (or `"${NAME}"` in JSON). Removed in 2.0. */
 	clientSecretEnv?: string;
 }
 
-/** An access token read from environment variables (defaults shown), e.g. from `sf org display`. */
-export interface EnvAccessTokenAuth {
+/** A fixed access token, e.g. from `sf org display`. Keys you leave out are read from the default variables shown. */
+export interface AccessTokenAuth {
 	type: "accessToken";
-	/** Defaults to `SF_ACCESS_TOKEN`. */
+	/** Defaults to the `SF_ACCESS_TOKEN` variable. */
+	accessToken?: ConfigValue;
+	/** Defaults to the `SF_INSTANCE_URL` variable. */
+	instanceUrl?: ConfigValue;
+	/** @deprecated Use `accessToken: process.env.NAME` (or `"${NAME}"` in JSON). Removed in 2.0. */
 	accessTokenEnv?: string;
-	/** Defaults to `SF_INSTANCE_URL`. */
+	/** @deprecated Use `instanceUrl: process.env.NAME` (or `"${NAME}"` in JSON). Removed in 2.0. */
 	instanceUrlEnv?: string;
 }
 
-/** JWT bearer flow with values read from environment variables (defaults shown). */
-export interface EnvJwtBearerAuth {
+/** OAuth 2.0 JWT bearer flow. Keys you leave out are read from the default variables shown. */
+export interface JwtBearerAuth {
 	type: "jwtBearer";
-	/** Defaults to `SF_LOGIN_URL`. */
+	/** Defaults to the `SF_LOGIN_URL` variable. */
+	loginUrl?: ConfigValue;
+	/** Defaults to the `SF_CLIENT_ID` variable. */
+	clientId?: ConfigValue;
+	/** Defaults to the `SF_USERNAME` variable. */
+	username?: ConfigValue;
+	/** The PEM key itself. Defaults to the `SF_PRIVATE_KEY` variable. */
+	privateKey?: ConfigValue;
+	/** A path to the PEM key file, used when `privateKey` is empty. Defaults to the `SF_PRIVATE_KEY_PATH` variable. */
+	privateKeyPath?: ConfigValue;
+	/** @deprecated Use `loginUrl: process.env.NAME` (or `"${NAME}"` in JSON). Removed in 2.0. */
 	loginUrlEnv?: string;
-	/** Defaults to `SF_CLIENT_ID`. */
+	/** @deprecated Use `clientId: process.env.NAME` (or `"${NAME}"` in JSON). Removed in 2.0. */
 	clientIdEnv?: string;
-	/** Defaults to `SF_USERNAME`. */
+	/** @deprecated Use `username: process.env.NAME` (or `"${NAME}"` in JSON). Removed in 2.0. */
 	usernameEnv?: string;
-	/** The PEM key itself. Defaults to `SF_PRIVATE_KEY`. */
+	/** @deprecated Use `privateKey: process.env.NAME` (or `"${NAME}"` in JSON). Removed in 2.0. */
 	privateKeyEnv?: string;
-	/** A path to the PEM key file, used when the key variable is empty. Defaults to `SF_PRIVATE_KEY_PATH`. */
+	/** @deprecated Use `privateKeyPath: process.env.NAME` (or `"${NAME}"` in JSON). Removed in 2.0. */
 	privateKeyPathEnv?: string;
 }
 
-/** An auth setting that reads credentials from environment variables. The only kind a JSON config can use. */
 /** An org you are logged into with the Salesforce CLI (`sf org login web --alias my-org`). */
 export interface SfCliAuth {
 	type: "sfCli";
-	/** The org alias or username. Defaults to the CLI's default org. */
-	targetOrg?: string;
+	/**
+	 * The org alias or username, e.g. `process.env.NAME` or a `"${NAME}"` placeholder. Left out, the
+	 * CLI's default org is used (the CLI's own `SF_TARGET_ORG` variable can set it). Set but empty is an error.
+	 */
+	targetOrg?: ConfigValue;
 }
 
-export type EnvAuth = EnvClientCredentialsAuth | EnvAccessTokenAuth | EnvJwtBearerAuth | SfCliAuth;
+/** An auth setting that can be written as data. The only kind a JSON config can use. */
+export type AuthSetting = ClientCredentialsAuth | AccessTokenAuth | JwtBearerAuth | SfCliAuth;
 
-/** Env-based auth, or any auth provider (TypeScript configs only). */
-export type CodegenAuth = EnvAuth | AuthProvider;
+/** @deprecated Use `ClientCredentialsAuth`. */
+export type EnvClientCredentialsAuth = ClientCredentialsAuth;
+/** @deprecated Use `AccessTokenAuth`. */
+export type EnvAccessTokenAuth = AccessTokenAuth;
+/** @deprecated Use `JwtBearerAuth`. */
+export type EnvJwtBearerAuth = JwtBearerAuth;
+/** @deprecated Use `AuthSetting`. */
+export type EnvAuth = AuthSetting;
+
+/** An auth setting, or any auth provider (TypeScript configs only). */
+export type CodegenAuth = AuthSetting | AuthProvider;
 
 export type PicklistMode =
 	/** Every picklist is `string`. */
@@ -86,7 +126,10 @@ export interface CodegenConfig<S extends string = string> {
 	sobjects?: readonly S[];
 	/** sObjects to skip (applied after `sobjects`). */
 	exclude?: readonly string[];
-	/** How to authenticate. Defaults to client credentials from `SF_LOGIN_URL`, `SF_CLIENT_ID` and `SF_CLIENT_SECRET`. */
+	/**
+	 * How to authenticate, e.g. `{ type: "clientCredentials", clientId: process.env.MY_CLIENT_ID, ... }`.
+	 * Defaults to client credentials from `SF_LOGIN_URL`, `SF_CLIENT_ID` and `SF_CLIENT_SECRET`.
+	 */
 	auth?: CodegenAuth;
 	/** Fields to leave out of the create input per sObject (e.g. fields describe marks createable but REST rejects). */
 	excludeCreateFields?: Partial<Record<NoInfer<S>, readonly string[]>>;
@@ -114,7 +157,7 @@ export interface CodegenConfig<S extends string = string> {
  */
 export type JsonCodegenConfig = Omit<CodegenConfig, "auth" | "format" | "transport"> & {
 	$schema?: string;
-	auth?: EnvAuth;
+	auth?: AuthSetting;
 };
 
 /**

@@ -4,6 +4,8 @@ Every client needs an auth provider. A provider returns an access token and the 
 
 API calls go to the `instance_url` that comes back with the token, not to the login URL.
 
+The code generator logs in with the same keys: its config's `auth` setting takes `loginUrl`, `clientId`, `clientSecret` and so on, as plain data. See [Auth in the codegen config](codegen.md#auth). To log the client in the same way, use [`loadAuth()`](#reuse-the-codegen-configs-auth).
+
 ## Static access token
 
 Use this for a token you already have, for example from the Salesforce CLI (`sf org display --json`).
@@ -82,6 +84,26 @@ const auth = refreshToken({
 	onRefreshTokenRotated: (token) => save(token),
 });
 ```
+
+## Reuse the codegen config's auth
+
+`loadAuth()` reads your `sobjectly.config.*` and returns a provider for its `auth` setting, so the client logs in the same way as `sobjectly generate`, with no second copy of the credentials:
+
+```ts
+import { SalesforceClient } from "@cerios/salesforce-sobjectly";
+import { loadAuth } from "@cerios/salesforce-sobjectly/codegen";
+import { API_VERSION, type SObjectRegistry } from "./generated/sobjects";
+
+const sf = new SalesforceClient<SObjectRegistry>({ apiVersion: API_VERSION, auth: await loadAuth() });
+```
+
+- To use another login, pass a different provider as `auth`; the config is then not read.
+- The config is looked up in `process.cwd()` only, not in parent folders. Pass `{ cwd }` or `{ configPath }` to point elsewhere.
+- Values are resolved exactly as in [the codegen config](codegen.md#auth), from `process.env` unless you pass `{ env }`. Load your `.env` file first (e.g. `node --env-file=.env`).
+- No config file, or a missing credential, throws an error that says what is missing and how to fix it.
+- Pass `{ warn }` to receive warnings, such as for deprecated `*Env` keys.
+
+`loadAuth` is Node-only and loads a TypeScript config with `jiti`, which is why it lives in the `/codegen` entry and not in the client.
 
 ## Your own provider
 

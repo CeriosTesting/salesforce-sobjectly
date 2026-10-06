@@ -1,6 +1,6 @@
 import { isApiVersion } from "../api-version";
 
-import type { CodegenConfig, EnvAuth } from "./config";
+import type { AuthSetting, CodegenConfig } from "./config";
 
 /** Thrown when a codegen config is invalid. Lists every problem found. */
 export class CodegenConfigError extends Error {
@@ -14,12 +14,35 @@ export class CodegenConfigError extends Error {
 	}
 }
 
-/** The env-variable options each env-based auth type accepts. */
-export const AUTH_OPTIONS: Record<EnvAuth["type"], readonly string[]> = {
-	clientCredentials: ["loginUrlEnv", "clientIdEnv", "clientSecretEnv"],
-	accessToken: ["accessTokenEnv", "instanceUrlEnv"],
-	jwtBearer: ["loginUrlEnv", "clientIdEnv", "usernameEnv", "privateKeyEnv", "privateKeyPathEnv"],
+/** The options each auth type accepts: its credential keys, then the deprecated `*Env` keys. */
+export const AUTH_OPTIONS: Record<AuthSetting["type"], readonly string[]> = {
+	clientCredentials: ["loginUrl", "clientId", "clientSecret", "loginUrlEnv", "clientIdEnv", "clientSecretEnv"],
+	accessToken: ["accessToken", "instanceUrl", "accessTokenEnv", "instanceUrlEnv"],
+	jwtBearer: [
+		"loginUrl",
+		"clientId",
+		"username",
+		"privateKey",
+		"privateKeyPath",
+		"loginUrlEnv",
+		"clientIdEnv",
+		"usernameEnv",
+		"privateKeyEnv",
+		"privateKeyPathEnv",
+	],
 	sfCli: ["targetOrg"],
+};
+
+/** The deprecated `*Env` auth options, each mapped to the credential key that replaces it. */
+export const DEPRECATED_AUTH_OPTIONS: Readonly<Record<string, string>> = {
+	loginUrlEnv: "loginUrl",
+	clientIdEnv: "clientId",
+	clientSecretEnv: "clientSecret",
+	accessTokenEnv: "accessToken",
+	instanceUrlEnv: "instanceUrl",
+	usernameEnv: "username",
+	privateKeyEnv: "privateKey",
+	privateKeyPathEnv: "privateKeyPath",
 };
 
 export const PICKLIST_MODES = ["union", "string", "const", "enum"] as const;
@@ -188,17 +211,37 @@ function validateAuth(value: unknown, { json, problem }: Context): void {
 		return;
 	}
 	const { type, ...rest } = value as Record<string, unknown>;
-	const allowed = AUTH_OPTIONS[type as EnvAuth["type"]] as readonly string[] | undefined;
+	const allowed = AUTH_OPTIONS[type as AuthSetting["type"]] as readonly string[] | undefined;
 	if (!allowed) {
 		problem(`auth.type: must be one of ${Object.keys(AUTH_OPTIONS).join(", ")}, got ${show(type)}.`);
 		return;
 	}
 	for (const [key, option] of Object.entries(rest)) {
 		if (!allowed.includes(key)) {
-			problem(`auth.${key}: not an option of "${String(type)}". Valid options: ${allowed.join(", ")}.`);
-		} else if (typeof option !== "string" || option.length === 0) {
+			const valid = allowed.filter((name) => !(name in DEPRECATED_AUTH_OPTIONS));
+			problem(`auth.${key}: not an option of "${String(type)}". Valid options: ${valid.join(", ")}.`);
+		} else {
+			validateAuthOption(key, option, rest, problem);
+		}
+	}
+}
+
+function validateAuthOption(
+	key: string,
+	option: unknown,
+	setting: Record<string, unknown>,
+	problem: (message: string) => void,
+): void {
+	const replacement = DEPRECATED_AUTH_OPTIONS[key];
+	if (replacement !== undefined && replacement in setting) {
+		problem(`auth.${key}: use either ${replacement} or ${key}, not both.`);
+	} else if (replacement !== undefined) {
+		if (typeof option !== "string" || option.length === 0) {
 			problem(`auth.${key}: must be a non-empty string, got ${show(option)}.`);
 		}
+	} else if (option !== undefined && typeof option !== "string") {
+		// Credential values may be undefined here (process.env.X); generate reports them if still empty.
+		problem(`auth.${key}: must be a string, got ${show(option)}.`);
 	}
 }
 

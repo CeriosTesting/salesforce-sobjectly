@@ -49,7 +49,7 @@ export interface SalesforceClientOptions {
 	allowedOrigins?: string[];
 	/** Headers sent with every request, e.g. `{ "Sforce-Call-Options": "client=my-app" }`. */
 	headers?: Record<string, string>;
-	/** Observability hooks. Tokens are redacted. */
+	/** Observability hooks, e.g. for logging request and response bodies. Tokens are redacted. */
 	hooks?: RequestHooks;
 	/**
 	 * Cache metadata (describe, UI API object info, record type ids) in memory for the lifetime of

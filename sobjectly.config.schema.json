@@ -35,7 +35,7 @@
 			"items": { "$ref": "#/definitions/sobjectName" }
 		},
 		"auth": {
-			"description": "How the generator logs in. Credentials are read from environment variables. Defaults to client credentials from SF_LOGIN_URL, SF_CLIENT_ID and SF_CLIENT_SECRET.",
+			"description": "How the generator logs in. Fill in the credentials as \"${NAME}\" placeholders, which are read from the environment (e.g. loaded with --env-file .env). Keys you leave out are read from the default SF_* variables; without auth, client credentials come from SF_LOGIN_URL, SF_CLIENT_ID and SF_CLIENT_SECRET.",
 			"oneOf": [
 				{
 					"type": "object",
@@ -43,12 +43,33 @@
 					"required": ["type"],
 					"properties": {
 						"type": { "const": "clientCredentials" },
-						"loginUrlEnv": {
-							"$ref": "#/definitions/envName",
-							"description": "Defaults to SF_LOGIN_URL (your My Domain URL)."
+						"loginUrl": {
+							"$ref": "#/definitions/credential",
+							"description": "Your My Domain URL, or \"${NAME}\" to read it from the environment. Defaults to the SF_LOGIN_URL variable.",
+							"examples": ["${SF_LOGIN_URL}"]
 						},
-						"clientIdEnv": { "$ref": "#/definitions/envName", "description": "Defaults to SF_CLIENT_ID." },
-						"clientSecretEnv": { "$ref": "#/definitions/envName", "description": "Defaults to SF_CLIENT_SECRET." }
+						"clientId": {
+							"$ref": "#/definitions/credential",
+							"description": "The consumer key, or \"${NAME}\" to read it from the environment. Defaults to the SF_CLIENT_ID variable.",
+							"examples": ["${SF_CLIENT_ID}"]
+						},
+						"clientSecret": {
+							"$ref": "#/definitions/credential",
+							"description": "The consumer secret as \"${NAME}\", read from the environment. Defaults to the SF_CLIENT_SECRET variable.",
+							"examples": ["${SF_CLIENT_SECRET}"]
+						},
+						"loginUrlEnv": {
+							"$ref": "#/definitions/deprecatedEnvName",
+							"deprecationMessage": "Deprecated: use \"loginUrl\": \"${NAME}\"."
+						},
+						"clientIdEnv": {
+							"$ref": "#/definitions/deprecatedEnvName",
+							"deprecationMessage": "Deprecated: use \"clientId\": \"${NAME}\"."
+						},
+						"clientSecretEnv": {
+							"$ref": "#/definitions/deprecatedEnvName",
+							"deprecationMessage": "Deprecated: use \"clientSecret\": \"${NAME}\"."
+						}
 					}
 				},
 				{
@@ -57,8 +78,24 @@
 					"required": ["type"],
 					"properties": {
 						"type": { "const": "accessToken" },
-						"accessTokenEnv": { "$ref": "#/definitions/envName", "description": "Defaults to SF_ACCESS_TOKEN." },
-						"instanceUrlEnv": { "$ref": "#/definitions/envName", "description": "Defaults to SF_INSTANCE_URL." }
+						"accessToken": {
+							"$ref": "#/definitions/credential",
+							"description": "The access token as \"${NAME}\", read from the environment. Defaults to the SF_ACCESS_TOKEN variable.",
+							"examples": ["${SF_ACCESS_TOKEN}"]
+						},
+						"instanceUrl": {
+							"$ref": "#/definitions/credential",
+							"description": "The org's instance URL, or \"${NAME}\" to read it from the environment. Defaults to the SF_INSTANCE_URL variable.",
+							"examples": ["${SF_INSTANCE_URL}"]
+						},
+						"accessTokenEnv": {
+							"$ref": "#/definitions/deprecatedEnvName",
+							"deprecationMessage": "Deprecated: use \"accessToken\": \"${NAME}\"."
+						},
+						"instanceUrlEnv": {
+							"$ref": "#/definitions/deprecatedEnvName",
+							"deprecationMessage": "Deprecated: use \"instanceUrl\": \"${NAME}\"."
+						}
 					}
 				},
 				{
@@ -67,16 +104,50 @@
 					"required": ["type"],
 					"properties": {
 						"type": { "const": "jwtBearer" },
-						"loginUrlEnv": { "$ref": "#/definitions/envName", "description": "Defaults to SF_LOGIN_URL." },
-						"clientIdEnv": { "$ref": "#/definitions/envName", "description": "Defaults to SF_CLIENT_ID." },
-						"usernameEnv": { "$ref": "#/definitions/envName", "description": "Defaults to SF_USERNAME." },
+						"loginUrl": {
+							"$ref": "#/definitions/credential",
+							"description": "The login or My Domain URL, or \"${NAME}\" to read it from the environment. Defaults to the SF_LOGIN_URL variable.",
+							"examples": ["${SF_LOGIN_URL}"]
+						},
+						"clientId": {
+							"$ref": "#/definitions/credential",
+							"description": "The consumer key, or \"${NAME}\" to read it from the environment. Defaults to the SF_CLIENT_ID variable.",
+							"examples": ["${SF_CLIENT_ID}"]
+						},
+						"username": {
+							"$ref": "#/definitions/credential",
+							"description": "The username to act as, or \"${NAME}\" to read it from the environment. Defaults to the SF_USERNAME variable.",
+							"examples": ["${SF_USERNAME}"]
+						},
+						"privateKey": {
+							"$ref": "#/definitions/credential",
+							"description": "The PEM key itself as \"${NAME}\", read from the environment. Defaults to the SF_PRIVATE_KEY variable.",
+							"examples": ["${SF_PRIVATE_KEY}"]
+						},
+						"privateKeyPath": {
+							"$ref": "#/definitions/credential",
+							"description": "A path to the PEM key file, used when privateKey is empty. Defaults to the SF_PRIVATE_KEY_PATH variable.",
+							"examples": ["${SF_PRIVATE_KEY_PATH}"]
+						},
+						"loginUrlEnv": {
+							"$ref": "#/definitions/deprecatedEnvName",
+							"deprecationMessage": "Deprecated: use \"loginUrl\": \"${NAME}\"."
+						},
+						"clientIdEnv": {
+							"$ref": "#/definitions/deprecatedEnvName",
+							"deprecationMessage": "Deprecated: use \"clientId\": \"${NAME}\"."
+						},
+						"usernameEnv": {
+							"$ref": "#/definitions/deprecatedEnvName",
+							"deprecationMessage": "Deprecated: use \"username\": \"${NAME}\"."
+						},
 						"privateKeyEnv": {
-							"$ref": "#/definitions/envName",
-							"description": "The PEM key itself. Defaults to SF_PRIVATE_KEY."
+							"$ref": "#/definitions/deprecatedEnvName",
+							"deprecationMessage": "Deprecated: use \"privateKey\": \"${NAME}\"."
 						},
 						"privateKeyPathEnv": {
-							"$ref": "#/definitions/envName",
-							"description": "A path to the PEM key file. Defaults to SF_PRIVATE_KEY_PATH."
+							"$ref": "#/definitions/deprecatedEnvName",
+							"deprecationMessage": "Deprecated: use \"privateKeyPath\": \"${NAME}\"."
 						}
 					}
 				},
@@ -89,7 +160,7 @@
 						"targetOrg": {
 							"type": "string",
 							"minLength": 1,
-							"description": "The Salesforce CLI org alias or username. Defaults to the CLI's default org."
+							"description": "The Salesforce CLI org alias or username, or \"${NAME}\" to read it from the environment. Defaults to the CLI's default org."
 						}
 					}
 				}
@@ -131,9 +202,14 @@
 			"type": "string",
 			"pattern": "^[A-Za-z][A-Za-z0-9_]*$"
 		},
-		"envName": {
+		"credential": {
 			"type": "string",
 			"minLength": 1
+		},
+		"deprecatedEnvName": {
+			"type": "string",
+			"minLength": 1,
+			"description": "Deprecated: the name of the environment variable to read. Removed in 2.0."
 		},
 		"fieldMap": {
 			"type": "object",

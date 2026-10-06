@@ -73,6 +73,8 @@ export interface RequestEvent {
 	url: string;
 	/** Request headers with `Authorization` redacted. */
 	headers: Record<string, string>;
+	/** The body as sent: JSON or form text, or bytes for binary uploads. `undefined` without a body. */
+	body?: string | Uint8Array;
 	attempt: number;
 }
 
@@ -81,12 +83,20 @@ export interface ResponseEvent extends RequestEvent {
 	durationMs: number;
 	/** Response headers without `set-cookie`. */
 	responseHeaders: Record<string, string>;
+	/**
+	 * The response body: text for JSON, XML, CSV and `text/*`, bytes otherwise. `undefined` when
+	 * empty, and for successful streamed responses (Bulk API query results), which aren't read yet.
+	 */
+	responseBody?: string | Uint8Array;
 }
 
-/** Observability hooks, e.g. for logging in test reports. Tokens are never passed to hooks. */
+/**
+ * Observability hooks, e.g. for logging requests and responses in test reports. Tokens are never
+ * passed to hooks. A hook may return a promise; it is not awaited, and a rejection is ignored.
+ */
 export interface RequestHooks {
-	onRequest?(event: RequestEvent): void;
-	onResponse?(event: ResponseEvent): void;
+	onRequest?(event: RequestEvent): void | Promise<void>;
+	onResponse?(event: ResponseEvent): void | Promise<void>;
 }
 
 export interface ApiUsage {
@@ -109,6 +119,8 @@ export interface ConnectionOptions {
 	headers?: Record<string, string>;
 	hooks?: RequestHooks;
 }
+
+type StartedEvent = RequestEvent & { started: number };
 
 interface ResolvedRetry {
 	retries: number;
@@ -246,7 +258,7 @@ export class SalesforceConnection {
 		const signal = combineSignals(request.signal, timeoutMs);
 		const prepared = this.prepare(request, method, token, attempt, signal, timeoutMs);
 		const response = await this._transport.send(prepared.transportRequest);
-		this.afterResponse(prepared.event, response.status, response.headers);
+		this.afterResponse(prepared.event, response);
 		return response;
 	}
 
@@ -257,13 +269,13 @@ export class SalesforceConnection {
 		attempt: number,
 		signal: AbortSignal | undefined,
 		timeoutMs: number,
-	): { transportRequest: Parameters<HttpTransport["send"]>[0]; event: RequestEvent & { started: number } } {
+	): { transportRequest: Parameters<HttpTransport["send"]>[0]; event: StartedEvent } {
 		const url = this.resolveUrl(request.path, token.instanceUrl, request.query);
 		const { headers, body } = encodeRequest(request, this._headers);
 		headers.set("Authorization", `Bearer ${token.accessToken}`);
 
 		signal?.throwIfAborted();
-		const event: RequestEvent = { method, url: url.toString(), headers: redactHeaders(headers), attempt };
+		const event: RequestEvent = { method, url: url.toString(), headers: redactHeaders(headers), body, attempt };
 		callHook(() => this._hooks.onRequest?.(event));
 		return {
 			transportRequest: { method, url, headers, body, signal, timeoutMs: timeoutMs > 0 ? timeoutMs : undefined },
@@ -271,15 +283,17 @@ export class SalesforceConnection {
 		};
 	}
 
-	private afterResponse(event: RequestEvent & { started: number }, status: number, headers: Headers): void {
-		this.trackApiUsage(headers);
+	/** `body` is left out for a streamed response that hasn't been read yet. */
+	private afterResponse(event: StartedEvent, response: { status: number; headers: Headers; body?: Uint8Array }): void {
+		this.trackApiUsage(response.headers);
 		const { started, ...requestEvent } = event;
 		callHook(() =>
 			this._hooks.onResponse?.({
 				...requestEvent,
-				status,
+				status: response.status,
 				durationMs: Date.now() - started,
-				responseHeaders: headersToObject(headers),
+				responseHeaders: headersToObject(response.headers),
+				responseBody: response.body && eventBody(response.body, response.headers),
 			}),
 		);
 	}
@@ -318,11 +332,13 @@ export class SalesforceConnection {
 		let reauthenticated = false;
 		let retries = 0;
 		for (let attempt = 1; ; attempt++) {
-			const response = await this.openStream(stream, request, method, token, attempt, timeoutMs);
+			const { event, response } = await this.openStream(stream, request, method, token, attempt, timeoutMs);
 			if (response.status >= 200 && response.status < 300) {
+				this.afterResponse(event, { status: response.status, headers: response.headers });
 				return response;
 			}
 			const buffered = { status: response.status, headers: response.headers, body: await collect(response.body) };
+			this.afterResponse(event, buffered);
 			if (response.status === 401 && !reauthenticated && this._auth.invalidate) {
 				reauthenticated = true;
 				const next = await this.reauthenticate(token, request.signal, timeoutMs);
@@ -351,7 +367,7 @@ export class SalesforceConnection {
 		token: AccessToken,
 		attempt: number,
 		timeoutMs: number,
-	): Promise<StreamingTransportResponse> {
+	): Promise<{ event: StartedEvent; response: StreamingTransportResponse }> {
 		const headerTimeout = new AbortController();
 		const timer =
 			timeoutMs > 0
@@ -363,9 +379,7 @@ export class SalesforceConnection {
 		const signal = request.signal ? AbortSignal.any([request.signal, headerTimeout.signal]) : headerTimeout.signal;
 		try {
 			const prepared = this.prepare(request, method, token, attempt, signal, 0);
-			const response = await stream(prepared.transportRequest);
-			this.afterResponse(prepared.event, response.status, response.headers);
-			return response;
+			return { event: prepared.event, response: await stream(prepared.transportRequest) };
 		} finally {
 			clearTimeout(timer);
 		}
@@ -525,10 +539,16 @@ function assertSerializable(body: unknown): void {
 	}
 }
 
-/** Runs an observability hook; a throwing hook must never change the outcome of a request. */
-function callHook(hook: () => void): void {
+/**
+ * Runs an observability hook; a throwing hook must never change the outcome of a request. A
+ * returned promise is not awaited, and its rejection is swallowed so it can't go unhandled.
+ */
+function callHook(hook: () => void | Promise<void>): void {
 	try {
-		hook();
+		const result = hook();
+		if (result && typeof result.catch === "function") {
+			result.catch(() => undefined);
+		}
 	} catch {
 		// Ignored on purpose: the request already happened.
 	}
@@ -572,6 +592,14 @@ export function parseBody(response: TransportResponse, responseType: ResponseTyp
 		}
 	}
 	return text;
+}
+
+/** A response body for hooks: decoded text for text content types, bytes otherwise. */
+function eventBody(body: Uint8Array, headers: Headers): string | Uint8Array | undefined {
+	if (body.byteLength === 0) {
+		return undefined;
+	}
+	return isTextContentType((headers.get("content-type") ?? "").toLowerCase()) ? decoder.decode(body) : body;
 }
 
 function isTextContentType(contentType: string): boolean {

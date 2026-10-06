@@ -9,28 +9,39 @@ import { SalesforceClient } from "../client";
 import type { ApiVersion } from "../types/common";
 import type { DescribeSObjectResult } from "../types/describe";
 
-import type { CodegenAuth, CodegenConfig, EnvJwtBearerAuth } from "./config";
+import type { AuthSetting, CodegenAuth, CodegenConfig } from "./config";
 import { type CodegenDescribe, type GeneratedFileHashes, generateSource, readGeneratedHashes } from "./generator";
+import { CONFIG_FILE_NAMES, findConfigFiles, loadConfig } from "./load-config";
 import { validateConfig } from "./validate-config";
 
 export { defineConfig } from "./config";
 export type {
+	AccessTokenAuth,
+	AuthSetting,
+	ClientCredentialsAuth,
 	CodegenAuth,
 	CodegenConfig,
-	EnvAuth,
+	ConfigValue,
 	JsonCodegenConfig,
-	EnvAccessTokenAuth,
-	EnvClientCredentialsAuth,
-	EnvJwtBearerAuth,
+	JwtBearerAuth,
 	PicklistMode,
 	SfCliAuth,
 } from "./config";
+/* oxlint-disable typescript/no-deprecated -- kept exported until 2.0 so existing imports keep working */
+export type { EnvAuth, EnvAccessTokenAuth, EnvClientCredentialsAuth, EnvJwtBearerAuth } from "./config";
+/* oxlint-enable typescript/no-deprecated */
 export { generateSource, readGeneratedHashes } from "./generator";
 export type { CodegenDescribe, GeneratedFileHashes, GenerateSourceOptions } from "./generator";
 export { FIELD_TYPE_MAP, mapFieldType } from "./type-mapper";
 export type { CodegenField } from "./type-mapper";
 export { CONFIG_FILE_NAMES, findConfigFile, findConfigFiles, loadConfig } from "./load-config";
-export { AUTH_OPTIONS, CONFIG_OPTIONS, CodegenConfigError, validateConfig } from "./validate-config";
+export {
+	AUTH_OPTIONS,
+	CONFIG_OPTIONS,
+	CodegenConfigError,
+	DEPRECATED_AUTH_OPTIONS,
+	validateConfig,
+} from "./validate-config";
 export { AUTH_ENV_VARS, parseSObjects, renderConfig, runInit } from "./init";
 export type { InitAnswers, InitAuthType, InitConfigFormat, InitOptions, InitResult } from "./init";
 export { readlinePrompter } from "./prompter";
@@ -45,7 +56,7 @@ export interface GenerateOptions {
 	/** Directory that `output` is resolved against. Defaults to `process.cwd()`. */
 	cwd?: string;
 	logger?: CodegenLogger;
-	/** Environment to read credentials from. Defaults to `process.env`. */
+	/** Where `"${NAME}"` placeholders and the default `SF_*` variables are read from. Defaults to `process.env`. */
 	env?: Record<string, string | undefined>;
 	/** Write the file. Defaults to `true`; with `false` the source is only returned. */
 	write?: boolean;
@@ -142,7 +153,7 @@ async function buildSource(
 	const outputPath = isAbsolute(config.output) ? config.output : resolve(options.cwd ?? process.cwd(), config.output);
 
 	const client = new SalesforceClient({
-		auth: resolveAuth(config.auth, env),
+		auth: resolveAuth(config.auth, env, { warn: (message) => logger.warn(message) }),
 		apiVersion,
 		transport: config.transport,
 		retry: true,
@@ -209,55 +220,177 @@ function normalizeSource(source: string): string {
 	return result;
 }
 
-/** Turns the config's auth setting into an auth provider, reading env-based credentials. */
-export function resolveAuth(auth: CodegenAuth | undefined, env: Record<string, string | undefined>): AuthProvider {
+export interface ResolveAuthOptions {
+	/** Receives deprecation warnings, e.g. for the `*Env` keys. */
+	warn?: (message: string) => void;
+}
+
+/** Where the JWT private key comes from, in order of preference, with each default variable. */
+const PRIVATE_KEY_SOURCES = [
+	["privateKey", "SF_PRIVATE_KEY"],
+	["privateKeyPath", "SF_PRIVATE_KEY_PATH"],
+] as const;
+
+/** A `"${NAME}"` placeholder. Only a whole value counts, so a secret that contains `${` is kept as-is. */
+const ENV_PLACEHOLDER = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
+
+/**
+ * Turns the config's auth setting into an auth provider. Each credential comes from its key in
+ * the setting (a `"${NAME}"` placeholder is read from `env`), else from the variable a deprecated
+ * `*Env` key names, else from its default `SF_*` variable. Throws one error listing every
+ * missing credential.
+ */
+export function resolveAuth(
+	auth: CodegenAuth | undefined,
+	env: Record<string, string | undefined>,
+	options: ResolveAuthOptions = {},
+): AuthProvider {
 	const setting = auth ?? { type: "clientCredentials" };
 	if ("getToken" in setting) {
 		return setting;
 	}
-	const read = (name: string): string => {
-		const value = env[name];
-		if (!value) {
-			throw new Error(`Environment variable ${name} is not set.`);
+	const problems: string[] = [];
+	const lookup = (key: string, defaultEnv: string): Credential =>
+		readCredential(setting, key, defaultEnv, env, options.warn);
+	const read = (key: string, defaultEnv: string): string => {
+		const { value, problem } = lookup(key, defaultEnv);
+		if (problem) {
+			problems.push(problem);
 		}
 		return value;
 	};
 	switch (setting.type) {
-		case "accessToken":
-			return accessToken({
-				accessToken: read(setting.accessTokenEnv ?? "SF_ACCESS_TOKEN"),
-				instanceUrl: read(setting.instanceUrlEnv ?? "SF_INSTANCE_URL"),
-			});
-		case "jwtBearer":
-			return jwtBearerFromEnv(setting, env, read);
-		case "sfCli":
-			return sfCli({ targetOrg: setting.targetOrg });
-		case "clientCredentials":
-			return clientCredentials({
-				loginUrl: read(setting.loginUrlEnv ?? "SF_LOGIN_URL"),
-				clientId: read(setting.clientIdEnv ?? "SF_CLIENT_ID"),
-				clientSecret: read(setting.clientSecretEnv ?? "SF_CLIENT_SECRET"),
-			});
+		case "accessToken": {
+			const token = {
+				accessToken: read("accessToken", "SF_ACCESS_TOKEN"),
+				instanceUrl: read("instanceUrl", "SF_INSTANCE_URL"),
+			};
+			throwIfMissing(setting.type, problems);
+			return accessToken(token);
+		}
+		case "jwtBearer": {
+			const loginUrl = read("loginUrl", "SF_LOGIN_URL");
+			const clientId = read("clientId", "SF_CLIENT_ID");
+			const username = read("username", "SF_USERNAME");
+			// The key itself wins over the key file. Setting either one in the config skips both defaults,
+			// so a stray SF_PRIVATE_KEY can't override a configured key file.
+			const configured = PRIVATE_KEY_SOURCES.filter(([key]) => key in setting);
+			const found = (configured.length > 0 ? configured : PRIVATE_KEY_SOURCES).map(([key, defaultEnv]) => ({
+				key,
+				...lookup(key, defaultEnv),
+			}));
+			const source = found.find((item) => item.value);
+			if (source === undefined) {
+				problems.push(`no private key: ${found.map((item) => item.problem).join(", and ")}`);
+			}
+			throwIfMissing(setting.type, problems);
+			const privateKey = source?.key === "privateKeyPath" ? readFileSync(source.value, "utf8") : (source?.value ?? "");
+			return jwtBearer({ loginUrl, clientId, username, privateKey });
+		}
+		case "sfCli": {
+			// Left out: the CLI's default org. Set but empty fails like any other credential, so a typo
+			// in `process.env.NAME` can't silently switch to the default org.
+			const targetOrg = "targetOrg" in setting ? read("targetOrg", "") : undefined;
+			throwIfMissing(setting.type, problems);
+			return sfCli({ targetOrg });
+		}
+		case "clientCredentials": {
+			const credentials = {
+				loginUrl: read("loginUrl", "SF_LOGIN_URL"),
+				clientId: read("clientId", "SF_CLIENT_ID"),
+				clientSecret: read("clientSecret", "SF_CLIENT_SECRET"),
+			};
+			throwIfMissing(setting.type, problems);
+			return clientCredentials(credentials);
+		}
 		default:
 			throw new Error(`Unknown codegen auth type "${(setting as { type: string }).type}".`);
 	}
 }
 
-function jwtBearerFromEnv(
-	setting: EnvJwtBearerAuth,
+export interface LoadAuthOptions extends ResolveAuthOptions {
+	/** The config file. Defaults to the first `sobjectly.config.{ts,mts,cts,json}` in `cwd`. */
+	configPath?: string;
+	/** Where to look for the config file. Defaults to `process.cwd()`. */
+	cwd?: string;
+	/** Where `"${NAME}"` placeholders and the default `SF_*` variables are read from. Defaults to `process.env`. */
+	env?: Record<string, string | undefined>;
+}
+
+/**
+ * Loads the sobjectly config and returns an auth provider for its `auth` setting, so the client
+ * logs in the same way as `sobjectly generate`:
+ * `new SalesforceClient({ apiVersion: API_VERSION, auth: await loadAuth() })`.
+ * Throws when no config file is found, or one error listing every missing credential.
+ */
+export async function loadAuth(options: LoadAuthOptions = {}): Promise<AuthProvider> {
+	const cwd = options.cwd ?? process.cwd();
+	let configPath = options.configPath === undefined ? undefined : resolve(cwd, options.configPath);
+	if (configPath === undefined) {
+		const found = findConfigFiles(cwd);
+		if (found.length > 1) {
+			options.warn?.(`found ${found.join(" and ")}; using ${found[0]}. Remove the other one.`);
+		}
+		configPath = found[0];
+	}
+	if (configPath === undefined) {
+		throw new Error(
+			`No sobjectly config file found in ${cwd} (looked for ${CONFIG_FILE_NAMES.join(", ")}).\n` +
+				'Pass { configPath } to loadAuth(), run "npx sobjectly init" to create a config, ' +
+				"or pass an auth provider such as clientCredentials() to SalesforceClient directly.",
+		);
+	}
+	const { config } = await loadConfig(configPath);
+	return resolveAuth(config.auth, options.env ?? process.env, { warn: options.warn });
+}
+
+interface Credential {
+	value: string;
+	problem?: string;
+}
+
+function readCredential(
+	setting: AuthSetting,
+	key: string,
+	defaultEnv: string,
 	env: Record<string, string | undefined>,
-	read: (name: string) => string,
-): AuthProvider {
-	const keyEnv = setting.privateKeyEnv ?? "SF_PRIVATE_KEY";
-	const privateKey = env[keyEnv]
-		? read(keyEnv)
-		: readFileSync(read(setting.privateKeyPathEnv ?? "SF_PRIVATE_KEY_PATH"), "utf8");
-	return jwtBearer({
-		loginUrl: read(setting.loginUrlEnv ?? "SF_LOGIN_URL"),
-		clientId: read(setting.clientIdEnv ?? "SF_CLIENT_ID"),
-		username: read(setting.usernameEnv ?? "SF_USERNAME"),
-		privateKey,
-	});
+	warn: ((message: string) => void) | undefined,
+): Credential {
+	const values = setting as unknown as Record<string, unknown>;
+	if (key in values) {
+		// Set in the config: never fall back to a default variable, so `process.env.TYPO` fails loudly.
+		const configured = values[key];
+		const name = typeof configured === "string" ? ENV_PLACEHOLDER.exec(configured)?.[1] : undefined;
+		if (name !== undefined) {
+			return fromEnv(env, name, ` (from auth.${key} "${String(configured)}")`);
+		}
+		return typeof configured === "string" && configured.length > 0
+			? { value: configured }
+			: { value: "", problem: `auth.${key} is empty or undefined (if it reads process.env, that variable is not set)` };
+	}
+	const envKey = `${key}Env`;
+	const legacy = values[envKey];
+	if (typeof legacy === "string") {
+		warn?.(
+			`auth.${envKey} is deprecated and will be removed in 2.0. Use ${key}: process.env.${legacy} in a TypeScript config, or "${key}": "\${${legacy}}" in JSON.`,
+		);
+		return fromEnv(env, legacy, "");
+	}
+	return fromEnv(env, defaultEnv, "");
+}
+
+function fromEnv(env: Record<string, string | undefined>, name: string, origin: string): Credential {
+	const value = env[name];
+	return value ? { value } : { value: "", problem: `environment variable ${name}${origin} is not set` };
+}
+
+function throwIfMissing(type: string, problems: readonly string[]): void {
+	if (problems.length > 0) {
+		throw new Error(
+			`Missing Salesforce credentials for auth "${type}":\n${problems.map((problem) => `  - ${problem}`).join("\n")}\n` +
+				"Fill them in under auth in the config, or set the environment variables (e.g. with --env-file .env).",
+		);
+	}
 }
 
 async function resolveSObjectNames(

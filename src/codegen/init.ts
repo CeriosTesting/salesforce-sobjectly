@@ -45,11 +45,31 @@ export interface InitResult {
 const SOBJECT_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
 const NPM_SCRIPT = "sobjects:generate";
 
-/** The environment variables each auth type reads by default. */
+/** The credential keys `init` writes per auth type, each with the environment variable it suggests. */
+const AUTH_FIELDS: Record<InitAuthType, [key: string, envName: string][]> = {
+	clientCredentials: [
+		["loginUrl", "SF_LOGIN_URL"],
+		["clientId", "SF_CLIENT_ID"],
+		["clientSecret", "SF_CLIENT_SECRET"],
+	],
+	accessToken: [
+		["accessToken", "SF_ACCESS_TOKEN"],
+		["instanceUrl", "SF_INSTANCE_URL"],
+	],
+	jwtBearer: [
+		["loginUrl", "SF_LOGIN_URL"],
+		["clientId", "SF_CLIENT_ID"],
+		["username", "SF_USERNAME"],
+		["privateKeyPath", "SF_PRIVATE_KEY_PATH"],
+	],
+	sfCli: [],
+};
+
+/** The environment variables the config written by `init` reads, per auth type. */
 export const AUTH_ENV_VARS: Record<InitAuthType, string[]> = {
-	clientCredentials: ["SF_LOGIN_URL", "SF_CLIENT_ID", "SF_CLIENT_SECRET"],
-	accessToken: ["SF_ACCESS_TOKEN", "SF_INSTANCE_URL"],
-	jwtBearer: ["SF_LOGIN_URL", "SF_CLIENT_ID", "SF_USERNAME", "SF_PRIVATE_KEY_PATH"],
+	clientCredentials: AUTH_FIELDS.clientCredentials.map(([, envName]) => envName),
+	accessToken: AUTH_FIELDS.accessToken.map(([, envName]) => envName),
+	jwtBearer: AUTH_FIELDS.jwtBearer.map(([, envName]) => envName),
 	sfCli: [],
 };
 
@@ -223,7 +243,6 @@ function renderJsonConfig(answers: InitAnswers): string {
 }
 
 function renderTypeScriptConfig(answers: InitAnswers): string {
-	const envVars = AUTH_ENV_VARS[answers.auth];
 	const sobjects = answers.sobjects.map((name) => JSON.stringify(name)).join(", ");
 	return [
 		'import { defineConfig } from "@cerios/salesforce-sobjectly/codegen";',
@@ -235,7 +254,7 @@ function renderTypeScriptConfig(answers: InitAnswers): string {
 		`\toutput: ${JSON.stringify(answers.output)},`,
 		"\t// The sObjects to generate types for.",
 		`\tsobjects: [${sobjects}],`,
-		`\t// ${authComment(answers.auth, envVars)}`,
+		`\t// ${authComment(answers.auth)}`,
 		`\tauth: ${renderAuth(answers)},`,
 		`\tpicklists: ${JSON.stringify(answers.picklists)},`,
 		"});",
@@ -243,22 +262,29 @@ function renderTypeScriptConfig(answers: InitAnswers): string {
 	].join("\n");
 }
 
-function authSetting(answers: InitAnswers): { type: InitAuthType; targetOrg?: string } {
-	return answers.auth === "sfCli" && answers.targetOrg
-		? { type: "sfCli", targetOrg: answers.targetOrg }
-		: { type: answers.auth };
+/** The JSON auth setting: credentials are `"${NAME}"` placeholders, read from the environment. */
+function authSetting(answers: InitAnswers): Record<string, string> {
+	if (answers.auth === "sfCli") {
+		return answers.targetOrg ? { type: "sfCli", targetOrg: answers.targetOrg } : { type: "sfCli" };
+	}
+	const fields = AUTH_FIELDS[answers.auth].map(([key, envName]) => [key, `\${${envName}}`]);
+	return { type: answers.auth, ...Object.fromEntries(fields) };
 }
 
+/** The TypeScript auth setting: credentials are read with `process.env`. */
 function renderAuth(answers: InitAnswers): string {
-	const setting = authSetting(answers);
-	const targetOrg = setting.targetOrg ? `, targetOrg: ${JSON.stringify(setting.targetOrg)}` : "";
-	return `{ type: ${JSON.stringify(setting.type)}${targetOrg} }`;
+	if (answers.auth === "sfCli") {
+		const targetOrg = answers.targetOrg ? `, targetOrg: ${JSON.stringify(answers.targetOrg)}` : "";
+		return `{ type: "sfCli"${targetOrg} }`;
+	}
+	const fields = AUTH_FIELDS[answers.auth].map(([key, envName]) => `\t\t${key}: process.env.${envName},`);
+	return ["{", `\t\ttype: ${JSON.stringify(answers.auth)},`, ...fields, "\t}"].join("\n");
 }
 
-function authComment(auth: InitAuthType, envVars: readonly string[]): string {
+function authComment(auth: InitAuthType): string {
 	return auth === "sfCli"
 		? "Uses an org you are logged into with the Salesforce CLI (sf org login web)."
-		: `Reads ${formatList(envVars)} from the environment.`;
+		: "Fill these in from process.env (any variable names), a secret store or elsewhere. Keep secrets out of this file.";
 }
 
 async function maybeUpdateEnvExample(options: InitOptions, auth: InitAuthType): Promise<boolean> {
@@ -327,9 +353,10 @@ function printNextSteps(log: (message: string) => void, answers: InitAnswers, sc
 			"Next steps:",
 			firstStep,
 			`  2. Generate the types: ${command}`,
-			"  3. Use them:",
+			"  3. Use them, logging in with the config's auth:",
+			'       import { loadAuth } from "@cerios/salesforce-sobjectly/codegen";',
 			`       import { API_VERSION, type SObjectRegistry } from "./${answers.output.replace(/\.(ts|mts|cts)$/, "")}";`,
-			"       const sf = new SalesforceClient<SObjectRegistry>({ apiVersion: API_VERSION, auth });",
+			"       const sf = new SalesforceClient<SObjectRegistry>({ apiVersion: API_VERSION, auth: await loadAuth() });",
 		].join("\n"),
 	);
 }

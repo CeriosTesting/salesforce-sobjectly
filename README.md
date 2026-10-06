@@ -54,11 +54,18 @@ export default defineConfig({
 	apiVersion: "v66.0",
 	output: "src/generated/sobjects.ts",
 	sobjects: ["Account", "Contact", "Case", "User"],
-	// Reads SF_LOGIN_URL, SF_CLIENT_ID and SF_CLIENT_SECRET from the environment.
-	auth: { type: "clientCredentials" },
+	// Fill these in from process.env (any variable names), a secret store or elsewhere.
+	auth: {
+		type: "clientCredentials",
+		loginUrl: process.env.SF_LOGIN_URL,
+		clientId: process.env.SF_CLIENT_ID,
+		clientSecret: process.env.SF_CLIENT_SECRET,
+	},
 	picklists: "union",
 });
 ```
+
+The variable names are only suggestions; use whatever names your environment already has. A JSON config uses `"${NAME}"` placeholders instead. See [Auth](docs/codegen.md#auth) for every login method.
 
 ### 2. Generate types for your org
 
@@ -79,6 +86,7 @@ const sf = new SalesforceClient<SObjectRegistry>({
 		clientId: process.env.SF_CLIENT_ID!,
 		clientSecret: process.env.SF_CLIENT_SECRET!,
 	}),
+	// or reuse the config's auth: auth: await loadAuth() from "@cerios/salesforce-sobjectly/codegen"
 });
 
 // CRUD
@@ -107,16 +115,16 @@ for await (const contact of sf.iterate(sf.soql("Contact").select("Id", "Email"))
 
 ## 📖 Documentation
 
-| Guide                                                        | What's in it                                                                                            |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| [Authentication](docs/authentication.md)                     | Salesforce CLI, access tokens, client credentials, JWT bearer, refresh tokens, custom providers         |
-| [Code generation](docs/codegen.md)                           | Config reference, type mapping, required fields, picklists, CI usage                                    |
-| [SOQL builder](docs/soql.md)                                 | Selecting, relationships, filters, aggregates, pagination, escaping                                     |
-| [Composite & collections](docs/composite-and-collections.md) | Composite with references, batch, tree, graph, sObject collections                                      |
-| [Approvals, files, reports & more](docs/platform.md)         | Record types, picklists, platform events, approvals, quick actions, UI API, files, reports, query plans |
-| [Bulk API 2.0](docs/bulk.md)                                 | Ingest jobs, query jobs, CSV handling                                                                   |
-| [Transports](docs/transports.md)                             | Custom HTTP clients (axios and Playwright examples), streaming, hooks, retries, timeouts                |
-| [Endpoint coverage](docs/endpoints.md)                       | Which Salesforce REST resources have typed helpers                                                      |
+| Guide                                                        | What's in it                                                                                                 |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| [Authentication](docs/authentication.md)                     | Salesforce CLI, access tokens, client credentials, JWT bearer, refresh tokens, custom providers              |
+| [Code generation](docs/codegen.md)                           | Config reference, type mapping, required fields, picklists, CI usage                                         |
+| [SOQL builder](docs/soql.md)                                 | Selecting, relationships, filters, aggregates, pagination, escaping                                          |
+| [Composite & collections](docs/composite-and-collections.md) | Composite with references, batch, tree, graph, sObject collections                                           |
+| [Approvals, files, reports & more](docs/platform.md)         | Record types, picklists, platform events, approvals, quick actions, UI API, files, reports, query plans      |
+| [Bulk API 2.0](docs/bulk.md)                                 | Ingest jobs, query jobs, CSV handling                                                                        |
+| [Transports](docs/transports.md)                             | Custom HTTP clients (axios and Playwright examples), streaming, hooks and request logging, retries, timeouts |
+| [Endpoint coverage](docs/endpoints.md)                       | Which Salesforce REST resources have typed helpers                                                           |
 
 ## 🧭 API Overview
 
