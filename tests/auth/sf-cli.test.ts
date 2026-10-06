@@ -166,6 +166,18 @@ describe("sfCli default command runner", () => {
 		expect(calls[0]?.options.env?.SF_JSON_TO_STDOUT).toBe("true");
 	});
 
+	it("turns colors off, even when FORCE_COLOR is set", async () => {
+		vi.stubEnv("FORCE_COLOR", "1");
+		try {
+			const calls = mockExecFile(answers);
+			await sfCli().getToken({ transport: new FakeTransport() });
+			expect(calls[0]?.options.env?.NO_COLOR).toBe("1");
+			expect(calls[0]?.options.env).not.toHaveProperty("FORCE_COLOR");
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
+
 	it("runs the .cmd shim through cmd.exe on Windows with one quoted command line", async () => {
 		setPlatform("win32");
 		const calls = mockExecFile(answers);
