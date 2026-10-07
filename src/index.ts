@@ -114,6 +114,7 @@ export type { InvokeQuickActionOptions } from "./resources/quick-actions";
 export { reportRows, ReportsApi } from "./resources/reports";
 export type { ReportRow, RunReportOptions, WaitForReportOptions } from "./resources/reports";
 export { UiApi } from "./resources/ui-api";
+export { UsersApi } from "./resources/users";
 export type { UiLayoutOptions, UiRecordFields, UiRecordOptions } from "./resources/ui-api";
 export type { CustomActionType, InvokeOptions } from "./resources/actions";
 export { BulkApi, BulkIngestJob, BulkQueryJob } from "./resources/bulk";
@@ -127,14 +128,32 @@ export type {
 } from "./resources/bulk";
 export { CollectionsApi } from "./resources/collections";
 export type { CollectionOptions } from "./resources/collections";
-export { CompositeApi, CompositeRequestBuilder, CompositeResponse } from "./resources/composite";
+export {
+	CompositeApi,
+	CompositeBatchBuilder,
+	CompositeBatchResponse,
+	CompositeRequestBuilder,
+	CompositeResponse,
+	SubrequestBuilder,
+} from "./resources/composite";
 export type {
+	BatchBinaryPart,
+	BatchBlob,
+	BatchRef,
+	CompositeBatchOptions,
+	CompositeBatchRawSubrequest,
 	CompositeBatchRequest,
+	CompositeCollectionOptions,
 	CompositeGraphInput,
+	CompositeGraphRefs,
 	CompositeGraphResult,
 	CompositeOptions,
 	CompositeRawSubrequest,
 	CompositeRef,
+	SubrequestHandle,
+	SubrequestKind,
+	SubrequestKinds,
+	SubrequestOptionArgs,
 	SubrequestOptions,
 	TreeChildRecord,
 	TreeRecord,

@@ -2,7 +2,11 @@ import type { MetadataCache } from "../cache";
 import { SalesforceSaveError } from "../errors";
 import { externalIdText, type SalesforceConnection, segment } from "../http/connection";
 import type {
+	ChildRelationshipName,
+	ChildSObjectName,
 	ExternalIdField,
+	ParentRelationshipName,
+	ParentSObjectName,
 	RecordTypeName,
 	SObjectCreateInput,
 	SObjectFieldName,
@@ -12,12 +16,23 @@ import type {
 } from "../registry";
 import type { NoSelection, SoqlQueryBuilder, SoqlQueryRecord } from "../soql/query-builder";
 import { SoqlQueryBuilder as Builder } from "../soql/query-builder";
-import type { DeletedRecordsResult, UpdatedRecordsResult } from "../types/api";
-import type { SaveResult, UpsertResult, WithAttributes } from "../types/common";
+import type {
+	ApprovalLayoutsResult,
+	CompactLayoutsResult,
+	DeletedRecordsResult,
+	DescribeLayout,
+	DescribeLayoutsResult,
+	ListViewDescribe,
+	ListViewResults,
+	ListViewsResult,
+	UpdatedRecordsResult,
+} from "../types/api";
+import type { QueryResponse, SaveResult, UpsertResult, WithAttributes } from "../types/common";
 import type { DescribeSObjectResult, SObjectBasicInfo } from "../types/describe";
 
 import type { QueryApi, QueryOptions, QueryResult } from "./query";
 import { QuickActionsApi } from "./quick-actions";
+import { formatDateTime } from "./subrequests";
 import { UiApi } from "./ui-api";
 
 export interface UpsertOutcome {
@@ -240,6 +255,99 @@ export class SObjectResource<R extends object, K extends SObjectName<R>> {
 		});
 	}
 
+	/**
+	 * The child records of one relationship (`GET /sobjects/{name}/{id}/{relationship}`), e.g.
+	 * `sobject("Account").children(id, "Contacts", ["LastName"])`. Returns the first page.
+	 */
+	children<
+		// `const` keeps the literal relationship name, so the child sObject resolves.
+		const C extends ChildRelationshipName<R, K>,
+		F extends SObjectFieldName<R, ChildSObjectName<R, K, C>> = SObjectFieldName<R, ChildSObjectName<R, K, C>>,
+	>(
+		id: string,
+		relationship: C,
+		fields?: readonly F[],
+		options: RequestSignal = {},
+	): Promise<QueryResponse<WithAttributes<Pick<SObjectRecord<R, ChildSObjectName<R, K, C>>, F>>>> {
+		return this.related(id, relationship, fields, options);
+	}
+
+	/**
+	 * The parent record of one relationship (`GET /sobjects/{name}/{id}/{relationship}`), e.g.
+	 * `sobject("Contact").parent(id, "Account", ["Name"])`.
+	 */
+	parent<
+		const P extends ParentRelationshipName<R, K>,
+		F extends SObjectFieldName<R, ParentSObjectName<R, K, P>> = SObjectFieldName<R, ParentSObjectName<R, K, P>>,
+	>(
+		id: string,
+		relationship: P,
+		fields?: readonly F[],
+		options: RequestSignal = {},
+	): Promise<WithAttributes<Pick<SObjectRecord<R, ParentSObjectName<R, K, P>>, F>>> {
+		return this.related(id, relationship, fields, options);
+	}
+
+	/** `GET /sobjects/{name}/listviews`: the list views of this sObject. */
+	listViews(options: RequestSignal = {}): Promise<ListViewsResult> {
+		return this._connection.request({ path: `${this.path}/listviews`, signal: options.signal });
+	}
+
+	/** `GET /sobjects/{name}/listviews/recent`: the list views the user used most recently. */
+	recentListViews(options: RequestSignal = {}): Promise<ListViewsResult> {
+		return this._connection.request({ path: `${this.path}/listviews/recent`, signal: options.signal });
+	}
+
+	/** `GET /sobjects/{name}/listviews/{id}/describe`: columns, sort order and the SOQL query of a list view. */
+	listViewDescribe(listViewId: string, options: RequestSignal = {}): Promise<ListViewDescribe> {
+		return this._connection.request({
+			path: `${this.path}/listviews/${segment(requireId(listViewId))}/describe`,
+			signal: options.signal,
+		});
+	}
+
+	/** `GET /sobjects/{name}/listviews/{id}/results`: the rows of a list view (up to 2000 per call). */
+	listViewResults(
+		listViewId: string,
+		options: RequestSignal & { limit?: number; offset?: number } = {},
+	): Promise<ListViewResults> {
+		return this._connection.request({
+			path: `${this.path}/listviews/${segment(requireId(listViewId))}/results`,
+			query: { limit: options.limit, offset: options.offset },
+			signal: options.signal,
+		});
+	}
+
+	/**
+	 * `GET /sobjects/{name}/describe/layouts`: the page layouts and their record type mappings.
+	 * For objects with more than one record type, `layouts` is `null`; pass a record type id instead.
+	 */
+	layouts(options?: RequestSignal): Promise<DescribeLayoutsResult>;
+	/** `GET /sobjects/{name}/describe/layouts/{recordTypeId}`: the page layout of one record type. */
+	layouts(recordTypeId: string, options?: RequestSignal): Promise<DescribeLayout>;
+	layouts(recordTypeOrOptions?: string | RequestSignal, maybeOptions: RequestSignal = {}): Promise<unknown> {
+		const byRecordType = typeof recordTypeOrOptions === "string";
+		const options = byRecordType ? maybeOptions : (recordTypeOrOptions ?? {});
+		return this._connection.request({
+			path: `${this.path}/describe/layouts${byRecordType ? `/${segment(requireId(recordTypeOrOptions))}` : ""}`,
+			signal: options.signal,
+		});
+	}
+
+	/** `GET /sobjects/{name}/describe/compactLayouts`: the compact layouts and their record type mappings. */
+	compactLayouts(options: RequestSignal = {}): Promise<CompactLayoutsResult> {
+		return this._connection.request({ path: `${this.path}/describe/compactLayouts`, signal: options.signal });
+	}
+
+	/** `GET /sobjects/{name}/describe/approvalLayouts[/{approvalProcessName}]`: approval layouts. */
+	approvalLayouts(options: RequestSignal & { approvalProcessName?: string } = {}): Promise<ApprovalLayoutsResult> {
+		const name = options.approvalProcessName;
+		return this._connection.request({
+			path: `${this.path}/describe/approvalLayouts${name === undefined ? "" : `/${segment(name)}`}`,
+			signal: options.signal,
+		});
+	}
+
 	/** Starts a typed query on this sObject. */
 	soql(): SoqlQueryBuilder<R, K> {
 		return Builder.from<R, K>(this.name);
@@ -268,6 +376,19 @@ export class SObjectResource<R extends object, K extends SObjectName<R>> {
 	): AsyncGenerator<SoqlQueryRecord<R, K, S>, void, undefined> {
 		return this._queries.iterate(build(this.soql()).build(), options);
 	}
+
+	private related<T>(
+		id: string,
+		relationship: string,
+		fields: readonly string[] | undefined,
+		options: RequestSignal,
+	): Promise<T> {
+		return this._connection.request({
+			path: `${this.path}/${segment(requireId(id))}/${segment(relationship)}`,
+			query: { fields: fields && fields.length > 0 ? fields : undefined },
+			signal: options.signal,
+		});
+	}
 }
 
 function requireId(id: string): string {
@@ -275,9 +396,4 @@ function requireId(id: string): string {
 		throw new Error("A record id is required.");
 	}
 	return id;
-}
-
-/** Formats a date as `yyyy-MM-ddTHH:mm:ss+00:00`, the format the deleted/updated resources expect. */
-function formatDateTime(date: Date): string {
-	return `${date.toISOString().slice(0, 19)}+00:00`;
 }

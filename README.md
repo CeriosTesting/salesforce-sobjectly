@@ -130,11 +130,12 @@ for await (const contact of sf.iterate(sf.soql("Contact").select("Id", "Email"))
 
 ```ts
 sf.sobject("Account"): basicInfo, describe, create, get, update, delete, upsert, getByExternalId,
-                       getDeleted, getUpdated, getBlob, query, collect, iterate
+                       getDeleted, getUpdated, getBlob, children, parent, listViews, listViewResults,
+                       layouts, compactLayouts, approvalLayouts, query, collect, iterate
 sf.soql("Account") → SoqlQueryBuilder
 sf.query / sf.queryMore / sf.iterate / sf.collect     (queryAll via { includeDeleted: true })
 sf.search:      sosl, parameterized, suggestions
-sf.composite:   execute, batch, tree, graph
+sf.composite:   execute, batch, tree, graph   (typed builders; batch also uploads files)
 sf.collections: create, update, upsert, delete, retrieve        (≤ 200 per call, or { chunk: true })
 sf.actions:     invokeFlow, invokeApex, invokeStandard, invokeCustom, list*/describe*
 sf.tooling:     query, sobject, executeAnonymous, runTestsSynchronous, runTestsAsynchronous, request
@@ -147,7 +148,8 @@ sf.uiApi:       objectInfo, picklistValues, record, layout
 sf.quickActions / sf.sobject(name).quickActions: list, describe, defaultValues, invoke
 sf.sobject(name).recordTypeId(), .picklistValues();  sf.explain(query);  sf.clearCache()
 sf.tooling.debugLogs: capture, list, body   (executeAnonymous(apex, { captureLog: true }))
-sf.apexRest(), sf.request(), sf.limits(), sf.versions(), sf.describeGlobal(), sf.recordCount()
+sf.users:       passwordExpired, setPassword, resetPassword
+sf.apexRest(), sf.request(), sf.limits(), sf.versions(), sf.describeGlobal(), sf.recordCount(), sf.recentlyViewed()
 ```
 
 ### Flows and invocable actions

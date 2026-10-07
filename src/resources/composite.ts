@@ -1,5 +1,6 @@
 import { SalesforceError } from "../errors";
-import { externalIdText, type SalesforceConnection, segment } from "../http/connection";
+import { type RestRequest, type SalesforceConnection, segment } from "../http/connection";
+import { buildMultipart, type MultipartPart } from "../http/multipart";
 import type {
 	ChildRelationshipName,
 	ChildSObjectName,
@@ -10,24 +11,55 @@ import type {
 	SObjectRecord,
 	SObjectUpdateInput,
 } from "../registry";
-import type { SoqlQueryBuilder, SoqlQueryRecord } from "../soql/query-builder";
 import type {
 	CompositeBatchResult,
+	CompositeBatchSubrequest,
+	CompositeBatchSubrequestResult,
 	CompositeMethod,
 	CompositeSubrequest,
 	CompositeSubrequestResult,
+	OrgLimits,
+	SearchResult,
 	TreeSaveResult,
 } from "../types/api";
-import type { ApiVersion, QueryResponse, SaveResult, UpsertResult, WithAttributes } from "../types/common";
+import type {
+	ApiVersion,
+	DeleteResult,
+	GenericRecord,
+	SaveResult,
+	UpsertResult,
+	WithAttributes,
+} from "../types/common";
+
+import { collectionBody } from "./collections";
+import {
+	type BatchRef,
+	type CompositeRawSubrequest,
+	type CompositeRef,
+	SubrequestBuilder,
+	type SubrequestOptions,
+} from "./subrequests";
+
+export type {
+	BatchRef,
+	CompositeRawSubrequest,
+	CompositeRef,
+	SubrequestHandle,
+	SubrequestKind,
+	SubrequestKinds,
+	SubrequestOptionArgs,
+	SubrequestOptions,
+} from "./subrequests";
+export { SubrequestBuilder } from "./subrequests";
 
 const MAX_SUBREQUESTS = 25;
 const MAX_QUERY_SUBREQUESTS = 5;
 const MAX_GRAPHS = 75;
 const MAX_GRAPH_NODES = 500;
 const MAX_TREE_RECORDS = 200;
+const MAX_COLLECTION_RECORDS = 200;
+const MAX_COLLECTION_RETRIEVE_IDS = 2000;
 const REFERENCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_]*$/;
-
-declare const refResultType: unique symbol;
 
 /** Matches a composite reference such as `@{NewAccount.id}`. */
 const REFERENCE = /@\{[^{}]+\}/g;
@@ -46,122 +78,113 @@ function keepReferences(value: string, encode: (part: string) => string): string
 	return result + encode(value.slice(last));
 }
 
-/** A URL path segment that may be (or contain) a composite reference. */
-function refSegment(value: string): string {
-	return keepReferences(value, segment);
-}
-
-/**
- * A handle to a composite subrequest. Use `ref("id")` to reference its result in a later
- * subrequest (it becomes `@{referenceId.id}`) and `response.get(handle)` to read the result.
- */
-export interface CompositeRef<T> {
-	readonly referenceId: string;
-	/** Returns the `@{referenceId.path}` expression. Paths can go deeper, e.g. `"records[0].Id"`. */
-	ref(path: (keyof T & string) | (string & {})): string;
-	readonly [refResultType]?: T;
-}
-
-export interface SubrequestOptions {
-	/** A custom reference id. Defaults to `ref1`, `ref2`, ... */
-	referenceId?: string;
-	/** Extra headers for this subrequest (not Accept, Authorization or Content-Type). */
-	httpHeaders?: Record<string, string>;
-}
-
-export interface CompositeRawSubrequest {
-	method: CompositeMethod;
-	/** Relative to `/services/data/{version}` (e.g. `"/sobjects/Account"`) or a full `/services/...` path. */
-	path: string;
-	body?: unknown;
+/** Options of a collection subrequest inside `/composite`. */
+export interface CompositeCollectionOptions extends SubrequestOptions {
+	/** Roll back the whole collection subrequest when one record fails. */
+	allOrNone?: boolean;
 }
 
 /** Collects subrequests for `/composite` or one graph of `/composite/graph`. */
-export class CompositeRequestBuilder<R extends object> {
+export class CompositeRequestBuilder<R extends object> extends SubrequestBuilder<R, "composite"> {
 	private readonly _subrequests: CompositeSubrequest[] = [];
 	private _queryCount = 0;
 
 	constructor(
 		private readonly _apiVersion: ApiVersion,
 		private readonly _referencePrefix: string = "ref",
-	) {}
+	) {
+		super();
+	}
 
 	/** The subrequests collected so far. */
 	get subrequests(): readonly CompositeSubrequest[] {
 		return this._subrequests;
 	}
 
-	/** Number of query subrequests collected so far (Salesforce allows at most 5 per composite request). */
+	/** Number of query and collection subrequests collected so far (Salesforce allows at most 5 per composite request). */
 	get queryCount(): number {
 		return this._queryCount;
 	}
 
-	create<K extends SObjectName<R>>(
+	/** sObject Collections create: up to 200 records of one sObject. Counts against the limit of 5. */
+	createMany<K extends SObjectName<R>>(
 		sobject: K,
-		record: SObjectCreateInput<R, K>,
-		options?: SubrequestOptions,
-	): CompositeRef<SaveResult> {
-		return this.add("POST", `/sobjects/${segment(sobject)}`, record, options);
+		records: readonly SObjectCreateInput<R, K>[],
+		options: CompositeCollectionOptions = {},
+	): CompositeRef<SaveResult[]> {
+		assertCollectionSize(records.length, MAX_COLLECTION_RECORDS);
+		this._queryCount++;
+		return this.add("POST", "/composite/sobjects", collectionBody(sobject, records, options.allOrNone), options);
 	}
 
-	update<K extends SObjectName<R>>(
+	/** sObject Collections update: up to 200 records; every record needs its `Id`. */
+	updateMany<K extends SObjectName<R>>(
 		sobject: K,
-		id: string,
-		record: SObjectUpdateInput<R, K>,
-		options?: SubrequestOptions,
-	): CompositeRef<null> {
-		return this.add("PATCH", `/sobjects/${segment(sobject)}/${refSegment(id)}`, record, options);
+		records: readonly (SObjectUpdateInput<R, K> & { Id: string })[],
+		options: CompositeCollectionOptions = {},
+	): CompositeRef<SaveResult[]> {
+		assertCollectionSize(records.length, MAX_COLLECTION_RECORDS);
+		this._queryCount++;
+		return this.add("PATCH", "/composite/sobjects", collectionBody(sobject, records, options.allOrNone), options);
 	}
 
-	upsert<K extends SObjectName<R>, F extends ExternalIdField<R, K>>(
+	/** sObject Collections upsert by external id: up to 200 records of one sObject. */
+	upsertMany<K extends SObjectName<R>, F extends ExternalIdField<R, K>>(
 		sobject: K,
 		externalIdField: F,
-		externalIdValue: string | number,
-		record: Omit<SObjectCreateInput<R, K>, F>,
-		options?: SubrequestOptions,
-	): CompositeRef<UpsertResult> {
+		records: readonly SObjectCreateInput<R, K>[],
+		options: CompositeCollectionOptions = {},
+	): CompositeRef<UpsertResult[]> {
+		assertCollectionSize(records.length, MAX_COLLECTION_RECORDS);
+		this._queryCount++;
 		return this.add(
 			"PATCH",
-			`/sobjects/${segment(sobject)}/${segment(externalIdField)}/${refSegment(externalIdText(externalIdValue))}`,
-			record,
+			`/composite/sobjects/${segment(sobject)}/${segment(externalIdField)}`,
+			collectionBody(sobject, records, options.allOrNone),
 			options,
 		);
 	}
 
-	delete<K extends SObjectName<R>>(sobject: K, id: string, options?: SubrequestOptions): CompositeRef<null> {
-		return this.add("DELETE", `/sobjects/${segment(sobject)}/${refSegment(id)}`, undefined, options);
-	}
-
-	get<K extends SObjectName<R>, F extends SObjectFieldName<R, K> = SObjectFieldName<R, K>>(
-		sobject: K,
-		id: string,
-		fields?: readonly F[],
-		options?: SubrequestOptions,
-	): CompositeRef<WithAttributes<Pick<SObjectRecord<R, K>, F>>> {
-		const query = fields && fields.length > 0 ? `?fields=${fields.map(segment).join(",")}` : "";
-		return this.add("GET", `/sobjects/${segment(sobject)}/${refSegment(id)}${query}`, undefined, options);
-	}
-
-	/** Adds a SOQL query subrequest. Its result is one page (`QueryResponse`). */
-	query<K extends SObjectName<R>, S extends object>(
-		query: SoqlQueryBuilder<R, K, S>,
-		options?: SubrequestOptions,
-	): CompositeRef<QueryResponse<SoqlQueryRecord<R, K, S>>>;
-	query<T = Record<string, unknown>>(soql: string, options?: SubrequestOptions): CompositeRef<QueryResponse<T>>;
-	query(query: string | { build(): string }, options?: SubrequestOptions): CompositeRef<unknown> {
-		const soql = typeof query === "string" ? query : query.build();
+	/** sObject Collections delete: up to 200 ids, which may be references such as `account.ref("id")`. */
+	deleteMany(ids: readonly string[], options: CompositeCollectionOptions = {}): CompositeRef<DeleteResult[]> {
+		assertCollectionSize(ids.length, MAX_COLLECTION_RECORDS);
 		this._queryCount++;
-		return this.add("GET", `/query?q=${keepReferences(soql, encodeURIComponent)}`, undefined, options);
+		const list = ids.map((id) => keepReferences(id, encodeURIComponent)).join(",");
+		const allOrNone = options.allOrNone === undefined ? "" : `&allOrNone=${options.allOrNone}`;
+		return this.add("DELETE", `/composite/sobjects?ids=${list}${allOrNone}`, undefined, options);
 	}
 
-	/** Adds any other supported subrequest (sObject collections, describe, ...). */
-	request<T = unknown>(subrequest: CompositeRawSubrequest, options?: SubrequestOptions): CompositeRef<T> {
+	/** sObject Collections retrieve: up to 2000 records of one sObject. Inaccessible or unknown ids yield `null`. */
+	retrieveMany<K extends SObjectName<R>, F extends SObjectFieldName<R, K>>(
+		sobject: K,
+		ids: readonly string[],
+		fields: readonly F[],
+		options?: SubrequestOptions,
+	): CompositeRef<(WithAttributes<Pick<SObjectRecord<R, K>, F>> | null)[]> {
+		assertCollectionSize(ids.length, MAX_COLLECTION_RETRIEVE_IDS);
+		if (fields.length === 0) {
+			throw new Error("retrieveMany() requires at least one field.");
+		}
+		this._queryCount++;
+		return this.add("POST", `/composite/sobjects/${segment(sobject)}`, { ids, fields }, options);
+	}
+
+	/** Adds any other supported subrequest (describe layouts, Tooling queries, ...). */
+	override request<T = unknown>(subrequest: CompositeRawSubrequest, options?: SubrequestOptions): CompositeRef<T> {
 		const path = subrequest.path.split("?")[0].replace(/^\/?(services\/data\/)?v[\d.]+(?=\/)/, "");
 		// Salesforce counts query and sObject Collections subrequests (including Tooling queries) against the limit of 5.
 		if (/^\/?(tooling\/)?(query|queryAll)(\/|$)|^\/?composite\/sobjects(\/|$)/.test(path)) {
 			this._queryCount++;
 		}
-		return this.add(subrequest.method, subrequest.path, subrequest.body, options);
+		return super.request<T>(subrequest, options);
+	}
+
+	protected override countQuery(): void {
+		this._queryCount++;
+	}
+
+	protected override encode(value: string, encode: (part: string) => string): string {
+		return keepReferences(value, encode);
 	}
 
 	/** `ref1`, `ref2`, ...: skips ids already taken by a custom `referenceId`. */
@@ -175,7 +198,7 @@ export class CompositeRequestBuilder<R extends object> {
 		}
 	}
 
-	private add<T>(
+	protected add<T>(
 		method: CompositeMethod,
 		path: string,
 		body: unknown,
@@ -203,6 +226,128 @@ export class CompositeRequestBuilder<R extends object> {
 			referenceId,
 			ref: (refPath: string): string => `@{${referenceId}.${refPath}}`,
 		};
+	}
+}
+
+/** A file sent as a binary part of a multipart composite batch request. */
+export interface BatchBinaryPart {
+	/**
+	 * The name the resource expects for the binary part (`binaryPartNameAlias`): the blob field
+	 * for sObjects (e.g. `VersionData`, `Body`), or e.g. `fileData` for Connect file uploads.
+	 */
+	alias: string;
+	fileName: string;
+	/** Defaults to `application/octet-stream`. */
+	contentType?: string;
+	/** The file content. Strings are encoded as UTF-8. */
+	data: Uint8Array | string;
+}
+
+/** A blob field value for `createWithBlob` and `updateWithBlob`. */
+export interface BatchBlob<F extends string = string> extends Omit<BatchBinaryPart, "alias"> {
+	/** The blob field, e.g. `VersionData` on ContentVersion or `Body` on Attachment and Document. */
+	field: F;
+}
+
+export interface CompositeBatchRawSubrequest extends CompositeRawSubrequest {
+	/** Sends the batch as multipart with this file as the subrequest's binary part. */
+	binary?: BatchBinaryPart;
+}
+
+/**
+ * Collects the independent subrequests of `/composite/batch`. Unlike `/composite`, results can't
+ * be referenced by later subrequests, and SOSL search and `/limits` are supported.
+ */
+export class CompositeBatchBuilder<R extends object> extends SubrequestBuilder<R, "batch"> {
+	private readonly _subrequests: CompositeBatchSubrequest[] = [];
+	private readonly _binaryParts: MultipartPart[] = [];
+
+	constructor(private readonly _apiVersion: ApiVersion) {
+		super();
+	}
+
+	/** The subrequests collected so far. */
+	get subrequests(): readonly CompositeBatchSubrequest[] {
+		return this._subrequests;
+	}
+
+	/** The binary parts collected so far. When there are any, the batch is sent as multipart. */
+	get binaryParts(): readonly MultipartPart[] {
+		return this._binaryParts;
+	}
+
+	/** `GET /limits`. */
+	limits(): BatchRef<OrgLimits> {
+		return this.add("GET", "/limits", undefined);
+	}
+
+	/** Runs a SOSL search. Escape user input in the `FIND {...}` term with `soslEscape`. */
+	search<T = GenericRecord>(sosl: string): BatchRef<SearchResult<T>> {
+		if (typeof sosl !== "string" || sosl.trim().length === 0) {
+			throw new Error("search() requires a non-blank SOSL string.");
+		}
+		return this.add("GET", `/search?q=${encodeURIComponent(sosl)}`, undefined);
+	}
+
+	/** Creates a record with a blob field (e.g. a ContentVersion with `VersionData`), sent as a binary part. */
+	createWithBlob<K extends SObjectName<R>>(
+		sobject: K,
+		record: SObjectCreateInput<R, K>,
+		blob: BatchBlob<SObjectFieldName<R, K>>,
+	): BatchRef<SaveResult> {
+		return this.request<SaveResult>({
+			method: "POST",
+			path: `/sobjects/${segment(sobject)}`,
+			body: record,
+			binary: toBinaryPart(blob),
+		});
+	}
+
+	/** Updates a record and replaces a blob field, sent as a binary part. */
+	updateWithBlob<K extends SObjectName<R>>(
+		sobject: K,
+		id: string,
+		record: SObjectUpdateInput<R, K>,
+		blob: BatchBlob<SObjectFieldName<R, K>>,
+	): BatchRef<null> {
+		return this.request<null>({
+			method: "PATCH",
+			path: this.recordPath(sobject, id),
+			body: record,
+			binary: toBinaryPart(blob),
+		});
+	}
+
+	/** Adds any other supported subrequest (Connect, Chatter, ...), optionally with a binary part. */
+	override request<T = unknown>(subrequest: CompositeBatchRawSubrequest): BatchRef<T> {
+		const ref = this.add<T>(subrequest.method, subrequest.path, subrequest.body);
+		if (subrequest.binary) {
+			const name = `binaryPart${this._binaryParts.length + 1}`;
+			const request = this._subrequests[ref.index];
+			request.binaryPartName = name;
+			request.binaryPartNameAlias = subrequest.binary.alias;
+			this._binaryParts.push({
+				name,
+				filename: subrequest.binary.fileName,
+				contentType: subrequest.binary.contentType ?? "application/octet-stream",
+				data: subrequest.binary.data,
+			});
+		}
+		return ref;
+	}
+
+	protected override encode(value: string, encode: (part: string) => string): string {
+		return encode(value);
+	}
+
+	protected add<T>(method: CompositeMethod, path: string, body: unknown): BatchRef<T> {
+		const relative = path.replace(/^\/+/, "").replace(/^services\/data\/v\d+\.\d+\//, "");
+		const subrequest: CompositeBatchSubrequest = { method, url: `${this._apiVersion}/${relative}` };
+		if (body !== undefined) {
+			subrequest.richInput = body;
+		}
+		this._subrequests.push(subrequest);
+		return { index: this._subrequests.length - 1 };
 	}
 }
 
@@ -240,6 +385,39 @@ export class CompositeResponse {
 	}
 }
 
+/** The result of a composite batch request. */
+export class CompositeBatchResponse {
+	constructor(
+		readonly results: CompositeBatchSubrequestResult[],
+		/** `true` when any subrequest failed. */
+		readonly hasErrors: boolean,
+	) {}
+
+	/** The raw subrequest result for `ref`. */
+	result<T>(ref: BatchRef<T>): CompositeBatchSubrequestResult<T> {
+		const result = this.results[ref.index];
+		if (!result) {
+			throw new Error(`No composite batch result at index ${ref.index}.`);
+		}
+		return result as CompositeBatchSubrequestResult<T>;
+	}
+
+	/** The result of the subrequest for `ref`. Throws `SalesforceError` when that subrequest failed. */
+	get<T>(ref: BatchRef<T>): T {
+		const result = this.result(ref);
+		if (result.statusCode >= 400) {
+			throw new SalesforceError({
+				status: result.statusCode,
+				method: "POST",
+				path: `/composite/batch (#${ref.index})`,
+				body: result.result,
+				headers: {},
+			});
+		}
+		return result.result as T;
+	}
+}
+
 export interface CompositeOptions {
 	/** Roll back all subrequests when one fails. */
 	allOrNone?: boolean;
@@ -250,16 +428,33 @@ export interface CompositeOptions {
 	signal?: AbortSignal;
 }
 
-export interface CompositeGraphInput<R extends object> {
-	graphId: string;
-	build: (graph: CompositeRequestBuilder<R>) => void;
+export interface CompositeBatchOptions {
+	/** Skip the remaining subrequests once one fails. Defaults to `false`. */
+	haltOnError?: boolean;
+	/** Throw a `SalesforceError` for the first failed subrequest. Defaults to `false`. */
+	throwOnError?: boolean;
+	/**
+	 * Timeout for this call in milliseconds; `0` disables it. Defaults to the client timeout, or no
+	 * timeout when the batch uploads files. Salesforce itself stops a batch after 10 minutes.
+	 */
+	timeoutMs?: number;
+	signal?: AbortSignal;
 }
 
-export interface CompositeGraphResult {
+export interface CompositeGraphInput<R extends object, TRefs = void> {
+	graphId: string;
+	/** Adds the graph's subrequests. Return handles (e.g. `{ account }`) to read their results from `response.refs`. */
+	build: (graph: CompositeRequestBuilder<R>) => TRefs;
+}
+
+export interface CompositeGraphResult<TRefs = unknown> {
 	graphId: string;
 	isSuccessful: boolean;
-	response: CompositeResponse;
+	response: CompositeResponse & { refs: TRefs };
 }
+
+/** The refs type a graph input's `build` returns. */
+export type CompositeGraphRefs<G> = G extends { build: (graph: never) => infer TRefs } ? TRefs : unknown;
 
 export interface CompositeBatchRequest {
 	method: CompositeMethod;
@@ -329,26 +524,54 @@ export class CompositeApi<R extends object> {
 		return response;
 	}
 
-	/** `/composite/batch`: up to 25 independent subrequests (each counts against API limits). */
-	async batch(
+	/**
+	 * `/composite/batch`: up to 25 independent subrequests in one call (each counts against API limits).
+	 * Subrequests run in order and each commits on its own: a failure doesn't roll back earlier ones.
+	 * Salesforce stops a batch after 10 minutes; pass `timeoutMs` for batches that take longer than the client timeout.
+	 *
+	 * ```ts
+	 * const result = await sf.composite.batch(b => ({
+	 * 	account: b.get("Account", accountId, ["Name"]),
+	 * 	contacts: b.query(sf.soql("Contact").select("Id", "LastName").limit(10)),
+	 * 	limits: b.limits(),
+	 * }));
+	 * const name = result.get(result.refs.account).Name;
+	 * ```
+	 *
+	 * The array form sends untyped subrequests and returns the raw response.
+	 */
+	batch<TRefs = void>(
+		build: (batch: CompositeBatchBuilder<R>) => TRefs,
+		options?: CompositeBatchOptions,
+	): Promise<CompositeBatchResponse & { refs: TRefs }>;
+	batch(
 		requests: CompositeBatchRequest[],
-		options: { haltOnError?: boolean; signal?: AbortSignal } = {},
-	): Promise<CompositeBatchResult> {
-		if (requests.length === 0 || requests.length > MAX_SUBREQUESTS) {
-			throw new Error(`A composite batch needs 1 to ${MAX_SUBREQUESTS} subrequests, got ${requests.length}.`);
+		options?: Pick<CompositeBatchOptions, "haltOnError" | "timeoutMs" | "signal">,
+	): Promise<CompositeBatchResult>;
+	async batch(
+		input: ((batch: CompositeBatchBuilder<R>) => unknown) | CompositeBatchRequest[],
+		options: CompositeBatchOptions = {},
+	): Promise<unknown> {
+		const builder = new CompositeBatchBuilder<R>(this._connection.apiVersion);
+		const refs = typeof input === "function" ? input(builder) : addRawBatchRequests(builder, input);
+		const count = builder.subrequests.length;
+		if (count === 0 || count > MAX_SUBREQUESTS) {
+			throw new Error(`A composite batch needs 1 to ${MAX_SUBREQUESTS} subrequests, got ${count}.`);
 		}
-		const version = this._connection.apiVersion;
-		const batchRequests = requests.map((request) => ({
-			method: request.method,
-			url: `${version}${request.path.startsWith("/") ? request.path : `/${request.path}`}`,
-			...(request.body === undefined ? {} : { richInput: request.body }),
-		}));
-		return this._connection.request({
-			method: "POST",
-			path: "/composite/batch",
-			body: { haltOnError: options.haltOnError ?? false, batchRequests },
-			signal: options.signal,
-		});
+		const json = { haltOnError: options.haltOnError ?? false, batchRequests: builder.subrequests };
+		const raw = await this._connection.request<CompositeBatchResult>(
+			builder.binaryParts.length === 0
+				? { method: "POST", path: "/composite/batch", body: json, signal: options.signal, timeoutMs: options.timeoutMs }
+				: multipartBatch(json, builder.binaryParts, options),
+		);
+		if (typeof input !== "function") {
+			return raw;
+		}
+		const response = Object.assign(new CompositeBatchResponse(raw.results, raw.hasErrors), { refs });
+		if (options.throwOnError) {
+			throwFirstBatchError(response);
+		}
+		return response;
 	}
 
 	/**
@@ -372,23 +595,31 @@ export class CompositeApi<R extends object> {
 		});
 	}
 
-	/** `/composite/graph`: several independent all-or-nothing graphs of subrequests in one call. */
-	async graph(
-		graphs: CompositeGraphInput<R>[],
+	/**
+	 * `/composite/graph`: several independent all-or-nothing graphs of subrequests in one call.
+	 * Results come back in the order of `graphs`, each with the refs its `build` returned.
+	 */
+	async graph<const G extends readonly CompositeGraphInput<R, unknown>[]>(
+		graphs: G,
 		options: { signal?: AbortSignal } = {},
-	): Promise<CompositeGraphResult[]> {
+	): Promise<{ -readonly [I in keyof G]: CompositeGraphResult<CompositeGraphRefs<G[I]>> }> {
 		if (graphs.length === 0 || graphs.length > MAX_GRAPHS) {
 			throw new Error(`A composite graph request needs 1 to ${MAX_GRAPHS} graphs, got ${graphs.length}.`);
 		}
-		const payload = graphs.map((graph) => {
+		const seen = new Set<string>();
+		const built = graphs.map((graph) => {
+			if (seen.has(graph.graphId)) {
+				throw new Error(`Duplicate graphId "${graph.graphId}".`);
+			}
+			seen.add(graph.graphId);
 			const builder = new CompositeRequestBuilder<R>(this._connection.apiVersion);
-			graph.build(builder);
+			const refs = graph.build(builder);
 			if (builder.subrequests.length === 0) {
 				throw new Error(`Graph "${graph.graphId}" has no subrequests.`);
 			}
-			return { graphId: graph.graphId, compositeRequest: builder.subrequests };
+			return { graphId: graph.graphId, compositeRequest: builder.subrequests, refs };
 		});
-		const nodes = payload.reduce((sum, graph) => sum + graph.compositeRequest.length, 0);
+		const nodes = built.reduce((sum, graph) => sum + graph.compositeRequest.length, 0);
 		if (nodes > MAX_GRAPH_NODES) {
 			throw new Error(`A composite graph request allows at most ${MAX_GRAPH_NODES} nodes, got ${nodes}.`);
 		}
@@ -398,12 +629,65 @@ export class CompositeApi<R extends object> {
 				isSuccessful: boolean;
 				graphResponse: { compositeResponse: CompositeSubrequestResult[] };
 			}[];
-		}>({ method: "POST", path: "/composite/graph", body: { graphs: payload }, signal: options.signal });
-		return raw.graphs.map((graph) => ({
-			graphId: graph.graphId,
-			isSuccessful: graph.isSuccessful,
-			response: new CompositeResponse(graph.graphResponse.compositeResponse),
-		}));
+		}>({
+			method: "POST",
+			path: "/composite/graph",
+			body: { graphs: built.map(({ graphId, compositeRequest }) => ({ graphId, compositeRequest })) },
+			signal: options.signal,
+		});
+		const results = built.map(({ graphId, refs }): CompositeGraphResult<unknown> => {
+			const graph = raw.graphs.find((item) => item.graphId === graphId);
+			if (!graph) {
+				throw new Error(`No composite graph response for graphId "${graphId}".`);
+			}
+			return {
+				graphId,
+				isSuccessful: graph.isSuccessful,
+				response: Object.assign(new CompositeResponse(graph.graphResponse.compositeResponse), { refs }),
+			};
+		});
+		return results as { -readonly [I in keyof G]: CompositeGraphResult<CompositeGraphRefs<G[I]>> };
+	}
+}
+
+function addRawBatchRequests<R extends object>(
+	builder: CompositeBatchBuilder<R>,
+	requests: readonly CompositeBatchRequest[],
+): undefined {
+	for (const request of requests) {
+		builder.request({ method: request.method, path: request.path, body: request.body });
+	}
+	return undefined;
+}
+
+/** The multipart form of a batch: the JSON request first, then one part per file. */
+function multipartBatch(
+	json: object,
+	binaryParts: readonly MultipartPart[],
+	options: Pick<CompositeBatchOptions, "timeoutMs" | "signal">,
+): RestRequest {
+	const { body, contentType } = buildMultipart([
+		{ name: "json", contentType: "application/json", data: JSON.stringify(json) },
+		...binaryParts,
+	]);
+	return {
+		method: "POST",
+		path: "/composite/batch",
+		body,
+		headers: { "Content-Type": contentType },
+		signal: options.signal,
+		// Uploads can take long, so files disable the client timeout unless one is passed.
+		timeoutMs: options.timeoutMs ?? 0,
+	};
+}
+
+function toBinaryPart(blob: BatchBlob): BatchBinaryPart {
+	return { alias: blob.field, fileName: blob.fileName, contentType: blob.contentType, data: blob.data };
+}
+
+function assertCollectionSize(count: number, max: number): void {
+	if (count === 0 || count > max) {
+		throw new Error(`An sObject collection subrequest needs 1 to ${max} items, got ${count}.`);
 	}
 }
 
@@ -426,9 +710,21 @@ function throwFirstError(response: CompositeResponse): void {
 	}
 }
 
+function throwFirstBatchError(response: CompositeBatchResponse): void {
+	const index = response.results.findIndex((item) => item.statusCode >= 400 && !isProcessingHalted(item.result));
+	if (index >= 0) {
+		response.get({ index });
+	}
+}
+
+/** Subrequests skipped because an earlier one failed (`allOrNone` or `haltOnError`). */
 function isProcessingHalted(body: unknown): boolean {
 	return (
-		Array.isArray(body) && body.some((error) => (error as { errorCode?: string }).errorCode === "PROCESSING_HALTED")
+		Array.isArray(body) &&
+		body.some((error) => {
+			const code = (error as { errorCode?: string }).errorCode;
+			return code === "PROCESSING_HALTED" || code === "BATCH_PROCESSING_HALTED";
+		})
 	);
 }
 

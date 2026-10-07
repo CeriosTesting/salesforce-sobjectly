@@ -19,6 +19,39 @@ Describe results are cached per client, so repeated lookups cost nothing. `sf.cl
 
 The generated file also exports `RECORD_TYPES` and `PICKLIST_VALUES` constants, for looping in tests without an API call. With `picklists: "const"` or `"enum"`, each picklist also gets a named constant such as `CaseStatus.Working` (see the [codegen guide](./codegen.md#picklists)).
 
+## Relationships, list views and layouts
+
+Related records can be read by relationship name. The names, child sObjects and fields are checked against the registry.
+
+```ts
+const contacts = await sf.sobject("Account").children(accountId, "Contacts", ["LastName", "Email"]);
+contacts.records; // { LastName, Email }[] (first page)
+const account = await sf.sobject("Contact").parent(contactId, "Account", ["Name"]);
+```
+
+List views and layouts:
+
+```ts
+const { listviews } = await sf.sobject("Account").listViews();
+const rows = await sf.sobject("Account").listViewResults(listviews[0].id, { limit: 50 });
+const describe = await sf.sobject("Account").listViewDescribe(listviews[0].id); // includes the SOQL query
+
+await sf.sobject("Case").layouts(); // page layouts and record type mappings (layouts is null with several record types)
+await sf.sobject("Case").layouts(recordTypeId); // one record type's layout
+await sf.sobject("Case").compactLayouts();
+await sf.sobject("Case").approvalLayouts({ approvalProcessName: "Escalation" });
+```
+
+## Recently viewed records and user passwords
+
+```ts
+const recent = await sf.recentlyViewed({ limit: 10 }); // { attributes, Id, Name }[]
+
+await sf.users.passwordExpired(userId); // boolean
+await sf.users.setPassword(userId, newPassword);
+const temporary = await sf.users.resetPassword(userId); // also emails the user a reset link
+```
+
 ## Platform events
 
 ```ts

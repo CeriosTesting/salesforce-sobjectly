@@ -25,8 +25,9 @@ import { SearchApi } from "./resources/search";
 import { SObjectResource } from "./resources/sobject";
 import { ToolingApi } from "./resources/tooling";
 import { UiApi } from "./resources/ui-api";
+import { UsersApi } from "./resources/users";
 import { type NoSelection, SoqlQueryBuilder, type SoqlQueryRecord } from "./soql/query-builder";
-import type { ApiVersionInfo, OrgLimits, QueryPlan, RecordCountResult } from "./types/api";
+import type { ApiVersionInfo, OrgLimits, QueryPlan, RecentItem, RecordCountResult } from "./types/api";
 import type { ApiVersion, GenericRecord } from "./types/common";
 import type { DescribeGlobalResult } from "./types/describe";
 
@@ -104,6 +105,8 @@ export class SalesforceClient<R extends object = GenericRegistry> {
 	readonly files: FilesApi;
 	/** Reports: run synchronously or asynchronously and flatten the rows. */
 	readonly reports: ReportsApi;
+	/** User password management: expiry, set and reset. */
+	readonly users: UsersApi;
 	private readonly _queries: QueryApi;
 	private readonly _cache: MetadataCache;
 
@@ -135,6 +138,7 @@ export class SalesforceClient<R extends object = GenericRegistry> {
 		this.uiApi = new UiApi<R>(this.connection, this._cache);
 		this.files = new FilesApi(this.connection);
 		this.reports = new ReportsApi(this.connection);
+		this.users = new UsersApi(this.connection);
 	}
 
 	/** Drops cached metadata (describe results, object info, record type ids). */
@@ -246,6 +250,11 @@ export class SalesforceClient<R extends object = GenericRegistry> {
 			query: { sObjects: sobjects },
 			signal: options.signal,
 		});
+	}
+
+	/** `GET /recent`: the records the user viewed most recently, newest first. */
+	recentlyViewed(options: { limit?: number; signal?: AbortSignal } = {}): Promise<RecentItem[]> {
+		return this.connection.request({ path: "/recent", query: { limit: options.limit }, signal: options.signal });
 	}
 
 	/** `GET /sobjects`: every sObject visible to the user. */

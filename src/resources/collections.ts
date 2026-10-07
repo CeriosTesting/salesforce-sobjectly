@@ -116,10 +116,7 @@ export class CollectionsApi<R extends object> {
 		const results = await runChunks(
 			chunks(records, MAX_RECORDS, options),
 			(chunk) => {
-				const body = {
-					allOrNone: options.allOrNone ?? false,
-					records: chunk.map((record) => ({ attributes: { type: sobject }, ...record })),
-				};
+				const body = collectionBody(sobject, chunk, options.allOrNone);
 				return this._connection.request<T[]>({ method, path, body, signal: options.signal });
 			},
 			`${verb} ${sobject} records failed`,
@@ -127,6 +124,18 @@ export class CollectionsApi<R extends object> {
 		assertSuccess(`${verb} ${sobject} records`, results, options);
 		return results;
 	}
+}
+
+/** The body of an sObject Collections create, update or upsert. */
+export function collectionBody(
+	sobject: string,
+	records: readonly object[],
+	allOrNone: boolean | undefined,
+): { allOrNone: boolean; records: object[] } {
+	return {
+		allOrNone: allOrNone ?? false,
+		records: records.map((record) => ({ attributes: { type: sobject }, ...record })),
+	};
 }
 
 function chunks<T>(items: readonly T[], size: number, options: Pick<CollectionOptions, "chunk" | "allOrNone">): T[][] {
