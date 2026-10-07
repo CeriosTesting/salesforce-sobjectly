@@ -109,3 +109,82 @@ describe("sobject()", () => {
 		expect(() => createClient(new FakeTransport()).sobject("Account/../x")).toThrow(/Invalid sObject/);
 	});
 });
+
+describe("sobject() relationships, list views and layouts", () => {
+	it("reads child and parent records by relationship name", async () => {
+		const transport = new FakeTransport().reply(
+			{ body: { totalSize: 1, done: true, records: [{ attributes: { type: "Contact" }, LastName: "Doe" }] } },
+			{ body: { attributes: { type: "Account" }, Name: "Acme" } },
+		);
+		const sf = createClient<SObjectRegistry>(transport);
+		const contacts = await sf.sobject("Account").children("001", "Contacts", ["LastName"]);
+		expect(contacts.records[0]?.LastName).toBe("Doe");
+		expect(transport.last.path).toBe(`${API}/sobjects/Account/001/Contacts`);
+		expect(transport.last.url.search).toBe("?fields=LastName");
+		const account = await sf.sobject("Contact").parent("003", "Account");
+		expect(account.Name).toBe("Acme");
+		expect(transport.last.path).toBe(`${API}/sobjects/Contact/003/Account`);
+		expect(transport.last.url.search).toBe("");
+		expect(() => sf.sobject("Account").children(" ", "Contacts")).toThrow(/record id/);
+	});
+
+	it("calls the list view resources", async () => {
+		const transport = new FakeTransport(() => ({ body: {} }));
+		const accounts = createClient<SObjectRegistry>(transport).sobject("Account");
+		await accounts.listViews();
+		await accounts.recentListViews();
+		await accounts.listViewDescribe("00B1");
+		await accounts.listViewResults("00B1", { limit: 10, offset: 20 });
+		expect(transport.requests.map((request) => `${request.path}${request.url.search}`)).toEqual([
+			`${API}/sobjects/Account/listviews`,
+			`${API}/sobjects/Account/listviews/recent`,
+			`${API}/sobjects/Account/listviews/00B1/describe`,
+			`${API}/sobjects/Account/listviews/00B1/results?limit=10&offset=20`,
+		]);
+	});
+
+	it("calls the layout resources", async () => {
+		const transport = new FakeTransport(() => ({ body: {} }));
+		const cases = createClient<SObjectRegistry>(transport).sobject("Case");
+		await cases.layouts();
+		await cases.layouts("012A", { signal: new AbortController().signal });
+		await cases.compactLayouts();
+		await cases.approvalLayouts();
+		await cases.approvalLayouts({ approvalProcessName: "Escalation" });
+		expect(transport.requests.map((request) => request.path)).toEqual([
+			`${API}/sobjects/Case/describe/layouts`,
+			`${API}/sobjects/Case/describe/layouts/012A`,
+			`${API}/sobjects/Case/describe/compactLayouts`,
+			`${API}/sobjects/Case/describe/approvalLayouts`,
+			`${API}/sobjects/Case/describe/approvalLayouts/Escalation`,
+		]);
+		expect(transport.requests[1]?.signal).toBeDefined();
+	});
+});
+
+describe("recently viewed and user passwords", () => {
+	it("lists recently viewed records", async () => {
+		const transport = new FakeTransport().reply({ body: [{ attributes: { type: "Account" }, Id: "001", Name: "A" }] });
+		const items = await createClient(transport).recentlyViewed({ limit: 5 });
+		expect(items[0]?.Name).toBe("A");
+		expect(`${transport.last.path}${transport.last.url.search}`).toBe(`${API}/recent?limit=5`);
+	});
+
+	it("checks, sets and resets a password", async () => {
+		const transport = new FakeTransport().reply(
+			{ body: { isExpired: true } },
+			{ status: 204 },
+			{ body: { NewPassword: "generated" } },
+		);
+		const users = createClient(transport).users;
+		expect(await users.passwordExpired("005A")).toBe(true);
+		expect(transport.last.path).toBe(`${API}/sobjects/User/005A/password`);
+		await users.setPassword("005A", "s3cret!");
+		expect(transport.last.method).toBe("POST");
+		expect(transport.last.json).toEqual({ NewPassword: "s3cret!" });
+		expect(await users.resetPassword("005A")).toBe("generated");
+		expect(transport.last.method).toBe("DELETE");
+		await expect(users.setPassword("005A", "")).rejects.toThrow(/new password/);
+		await expect(users.passwordExpired("")).rejects.toThrow(/user id/);
+	});
+});

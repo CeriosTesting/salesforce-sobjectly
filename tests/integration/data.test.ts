@@ -153,4 +153,81 @@ describe.skipIf(!liveOrgConfigured)("live org: data", () => {
 		const g1 = graphs[0]?.response.responses ?? [];
 		track(...g1.map((item) => (item.body as { id?: string } | null)?.id).reverse());
 	});
+
+	it("runs typed batch subrequests and composite collection subrequests", async () => {
+		const composite = await sf.composite.execute(
+			(c) => {
+				const account = c.create("Account", { Name: `${marker} batch` });
+				const contacts = c.createMany("Contact", [
+					{ LastName: `${marker} batch 1`, AccountId: account.ref("id") },
+					{ LastName: `${marker} batch 2`, AccountId: account.ref("id") },
+				]);
+				return { account, contacts };
+			},
+			{ allOrNone: true, throwOnError: true },
+		);
+		const accountId = composite.get(composite.refs.account).id ?? "";
+		const contactIds = composite.get(composite.refs.contacts).map((result) => result.id ?? "");
+		track(...contactIds, accountId);
+
+		const batch = await sf.composite.batch((b) => ({
+			account: b.get("Account", accountId, ["Name"]),
+			children: b.children("Account", accountId, "Contacts", ["LastName"]),
+			parent: b.parent("Contact", contactIds[0] ?? "", "Account", ["Name"]),
+			query: b.query(sf.soql("Contact").select("Id").where("AccountId", "=", accountId)),
+			limits: b.limits(),
+			missing: b.get("Account", "001000000000000AAA"),
+		}));
+		expect(batch.get(batch.refs.account).Name).toBe(`${marker} batch`);
+		expect(batch.get(batch.refs.children).totalSize).toBe(2);
+		expect(batch.get(batch.refs.parent).Name).toBe(`${marker} batch`);
+		expect(batch.get(batch.refs.query).totalSize).toBe(2);
+		expect(batch.get(batch.refs.limits).DailyApiRequests?.Max).toBeGreaterThan(0);
+		expect(batch.result(batch.refs.missing).statusCode).toBe(404);
+		expect(batch.hasErrors).toBe(true);
+
+		const halted = await sf.composite.batch(
+			(b) => [b.get("Account", "001000000000000AAA"), b.get("Account", accountId)],
+			{ haltOnError: true },
+		);
+		expect(halted.results.map((result) => result.statusCode)).toEqual([404, 412]);
+	});
+
+	it("uploads a ContentVersion in a multipart batch", async () => {
+		const batch = await sf.composite.batch(
+			(b) => ({
+				version: b.createWithBlob(
+					"ContentVersion",
+					{ Title: `${marker} batch file`, PathOnClient: `${marker}.txt` },
+					{ field: "VersionData", fileName: `${marker}.txt`, contentType: "text/plain", data: "hello batch" },
+				),
+			}),
+			{ throwOnError: true },
+		);
+		const versionId = batch.get(batch.refs.version).id ?? "";
+		const version = await sf.sobject("ContentVersion").get(versionId, ["ContentDocumentId"]);
+		const documentId = String(version.ContentDocumentId);
+		try {
+			expect(new TextDecoder().decode(await sf.files.download(versionId))).toBe("hello batch");
+		} finally {
+			await sf.sobject("ContentDocument").delete(documentId);
+		}
+	});
+
+	it("reads list views and layouts", async () => {
+		const accounts = sf.sobject("Account");
+		const { listviews } = await accounts.listViews();
+		expect(listviews.length).toBeGreaterThan(0);
+		const listViewId = listviews[0]?.id ?? "";
+		const describe = await accounts.listViewDescribe(listViewId);
+		expect(describe.query).toMatch(/FROM Account/i);
+		const results = await accounts.listViewResults(listViewId, { limit: 1 });
+		expect(results.columns.length).toBeGreaterThan(0);
+		const layouts = await accounts.layouts();
+		// `layouts` is null when Account has more than one record type.
+		expect((layouts.layouts ?? []).length + layouts.recordTypeMappings.length).toBeGreaterThan(0);
+		const compact = await accounts.compactLayouts();
+		expect(Array.isArray(compact.compactLayouts)).toBe(true);
+		expect(Array.isArray(await sf.recentlyViewed({ limit: 5 }))).toBe(true);
+	});
 });

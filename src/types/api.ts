@@ -150,15 +150,139 @@ export interface CompositeBatchSubrequest {
 	binaryPartNameAlias?: string;
 }
 
+export interface CompositeBatchSubrequestResult<T = unknown> {
+	statusCode: number;
+	result: T | RestError[] | null;
+}
+
 export interface CompositeBatchResult {
 	hasErrors: boolean;
-	results: { statusCode: number; result: unknown }[];
+	/** In the order of the subrequests. */
+	results: CompositeBatchSubrequestResult[];
 }
 
 export interface TreeSaveResult {
 	hasErrors: boolean;
 	results: { referenceId: string; id?: string; errors?: SaveError[] }[];
 }
+
+// ─── List views and layouts ─────────────────────────────────────────────────
+
+export interface ListViewSummary {
+	id: string;
+	developerName: string;
+	label: string;
+	describeUrl: string;
+	resultsUrl: string;
+	soqlCompatible: boolean;
+	url: string;
+}
+
+/** The `/sobjects/{name}/listviews` and `/listviews/recent` response. */
+export interface ListViewsResult {
+	done: boolean;
+	listviews: ListViewSummary[];
+	nextRecordsUrl: string | null;
+	size: number;
+	sobjectType: string;
+}
+
+export interface ListViewColumn {
+	fieldNameOrPath: string;
+	label: string;
+	type: string;
+	selectListItem: string;
+	hidden: boolean;
+	sortable: boolean;
+	sortDirection: string | null;
+	sortIndex: number | null;
+	ascendingLabel: string | null;
+	descendingLabel: string | null;
+	[key: string]: unknown;
+}
+
+/** The `/sobjects/{name}/listviews/{id}/describe` response. */
+export interface ListViewDescribe {
+	id: string;
+	sobjectType: string;
+	/** The SOQL query behind the list view. */
+	query: string;
+	columns: ListViewColumn[];
+	orderBy: { fieldNameOrPath: string; nullsPosition: string | null; sortDirection: string | null }[];
+	scope: string | null;
+	scopeEntityId?: string | null;
+	whereCondition: unknown;
+	[key: string]: unknown;
+}
+
+/** The `/sobjects/{name}/listviews/{id}/results` response. Values are formatted as strings. */
+export interface ListViewResults {
+	id: string;
+	developerName: string;
+	label: string;
+	columns: ListViewColumn[];
+	records: { columns: { fieldNameOrPath: string; value: string | null }[] }[];
+	done: boolean;
+	size: number;
+}
+
+/** One page layout, from `/sobjects/{name}/describe/layouts`. */
+export interface DescribeLayout {
+	id: string | null;
+	buttonLayoutSection: unknown;
+	detailLayoutSections: unknown[];
+	editLayoutSections: unknown[];
+	relatedLists: unknown[];
+	[key: string]: unknown;
+}
+
+/** The `/sobjects/{name}/describe/layouts` response. */
+export interface DescribeLayoutsResult {
+	/** `null` when the object has more than one record type: get those layouts by record type id. */
+	layouts: DescribeLayout[] | null;
+	recordTypeMappings: {
+		recordTypeId: string;
+		name: string;
+		layoutId: string;
+		available: boolean;
+		[key: string]: unknown;
+	}[];
+	recordTypeSelectorRequired: boolean[];
+	[key: string]: unknown;
+}
+
+export interface CompactLayout {
+	id: string | null;
+	name: string;
+	label: string;
+	objectType: string;
+	fieldItems: unknown[];
+	imageItems: unknown[];
+	actions: unknown[];
+	[key: string]: unknown;
+}
+
+/** The `/sobjects/{name}/describe/compactLayouts` response. */
+export interface CompactLayoutsResult {
+	compactLayouts: CompactLayout[];
+	defaultCompactLayoutId: string | null;
+	recordTypeCompactLayoutMappings: {
+		recordTypeId: string;
+		recordTypeName: string;
+		compactLayoutId: string | null;
+		compactLayoutName: string;
+		available: boolean;
+		[key: string]: unknown;
+	}[];
+}
+
+/** The `/sobjects/{name}/describe/approvalLayouts` response. */
+export interface ApprovalLayoutsResult {
+	approvalLayouts: { id: string; name: string; label: string; layoutItems: unknown[] }[];
+}
+
+/** A recently viewed record, from `/recent`. */
+export type RecentItem = WithAttributes<{ Id: string; Name: string }>;
 
 // ─── Invocable actions ──────────────────────────────────────────────────────
 

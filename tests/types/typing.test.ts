@@ -5,14 +5,16 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 
 import type { BulkCsvRecord } from "../../src/resources/bulk";
-import type { CompositeRef } from "../../src/resources/composite";
+import type { BatchRef, CompositeRef } from "../../src/resources/composite";
 import type { QueryResult } from "../../src/resources/query";
 import type { SoqlChildQueryResult, SoqlQueryRecord } from "../../src/soql/query-builder";
-import type { RecordAttributes, SaveResult, WithAttributes } from "../../src/types/common";
+import type { OrgLimits } from "../../src/types/api";
+import type { QueryResponse, RecordAttributes, SaveResult, WithAttributes } from "../../src/types/common";
 import {
 	API_VERSION,
 	type Account,
 	type AccountCreateInput,
+	type Contact,
 	type SObjectRegistry,
 	type User,
 } from "../fixtures/generated-sobjects";
@@ -143,6 +145,79 @@ describe("type safety", () => {
 			});
 			expectTypeOf(result.get(result.refs.account).id).toEqualTypeOf<string | undefined>();
 			expectTypeOf(result.get(result.refs.contacts).records[0].Email).toEqualTypeOf<string | null>();
+		};
+		expect(typeof run).toBe("function");
+	});
+
+	it("types composite batch subrequests and results", () => {
+		const run = async (): Promise<void> => {
+			const result = await sf.composite.batch((b) => {
+				const account = b.get("Account", "001", ["Id", "Name"]);
+				expectTypeOf(account).toEqualTypeOf<BatchRef<WithAttributes<Pick<Account, "Id" | "Name">>>>();
+				// @ts-expect-error batch subrequests can't reference each other
+				void account.ref;
+				// @ts-expect-error unknown field
+				b.get("Account", "001", ["Nope"]);
+				// @ts-expect-error unknown sObject
+				b.create("Nope", {});
+				// @ts-expect-error Contacts is a child relationship of Account, not of Contact
+				b.children("Contact", "003", "Contacts");
+				return {
+					account,
+					contacts: b.query(sf.soql("Contact").select("Id", "Email")),
+					children: b.children("Account", "001", "Contacts", ["LastName"]),
+					parent: b.parent("Contact", "003", "Account", ["Name"]),
+					limits: b.limits(),
+					created: b.create("Account", { Name: "Acme" }),
+				};
+			});
+			expectTypeOf(result.get(result.refs.account).Name).toEqualTypeOf<string>();
+			expectTypeOf(result.get(result.refs.contacts).records[0].Email).toEqualTypeOf<string | null>();
+			expectTypeOf(result.get(result.refs.children)).toEqualTypeOf<
+				QueryResponse<WithAttributes<Pick<Contact, "LastName">>>
+			>();
+			expectTypeOf(result.get(result.refs.parent)).toEqualTypeOf<WithAttributes<Pick<Account, "Name">>>();
+			expectTypeOf(result.get(result.refs.limits)).toEqualTypeOf<OrgLimits>();
+			expectTypeOf(result.get(result.refs.created)).toEqualTypeOf<SaveResult>();
+		};
+		expect(typeof run).toBe("function");
+	});
+
+	it("types relationship traversal on sobject()", () => {
+		const run = async (): Promise<void> => {
+			const contacts = await sf.sobject("Account").children("001", "Contacts", ["LastName"]);
+			expectTypeOf(contacts.records[0]).toEqualTypeOf<WithAttributes<Pick<Contact, "LastName">>>();
+			const account = await sf.sobject("Contact").parent("003", "Account", ["Name"]);
+			expectTypeOf(account).toEqualTypeOf<WithAttributes<Pick<Account, "Name">>>();
+			// @ts-expect-error Contact has no Contacts relationship
+			await sf.sobject("Contact").children("003", "Contacts");
+			// @ts-expect-error LastName is not a field of the parent Account
+			await sf.sobject("Contact").parent("003", "Account", ["LastName"]);
+		};
+		expect(typeof run).toBe("function");
+	});
+
+	it("types composite collection subrequests and graph refs", () => {
+		const run = async (): Promise<void> => {
+			const result = await sf.composite.execute((c) => {
+				const account = c.create("Account", { Name: "Acme" });
+				// @ts-expect-error records need an Id
+				c.updateMany("Account", [{ Name: "x" }]);
+				return {
+					contacts: c.createMany("Contact", [{ LastName: "Doe", AccountId: account.ref("id") }]),
+					accounts: c.retrieveMany("Account", ["001"], ["Name"]),
+				};
+			});
+			expectTypeOf(result.get(result.refs.contacts)).toEqualTypeOf<SaveResult[]>();
+			expectTypeOf(result.get(result.refs.accounts)).toEqualTypeOf<(WithAttributes<Pick<Account, "Name">> | null)[]>();
+
+			const [first, second] = await sf.composite.graph([
+				// oxlint-disable-next-line typescript/explicit-function-return-type -- the refs type is inferred from the return value
+				{ graphId: "g1", build: (g) => ({ account: g.create("Account", { Name: "A" }) }) },
+				{ graphId: "g2", build: (g): void => void g.delete("Account", "001") },
+			]);
+			expectTypeOf(first.response.refs.account).toEqualTypeOf<CompositeRef<SaveResult>>();
+			expectTypeOf(second.response.refs).toEqualTypeOf<void>();
 		};
 		expect(typeof run).toBe("function");
 	});
