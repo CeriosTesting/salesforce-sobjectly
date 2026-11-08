@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/no-deprecated -- these tests cover the deprecated hooks */
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 

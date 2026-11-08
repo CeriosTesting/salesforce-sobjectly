@@ -15,6 +15,7 @@ import {
 	loadConfig,
 	resolveAuth,
 } from "../../src/codegen/index";
+import { createLogger, type SalesforceLogEvent, type SalesforceLogLevel } from "../../src/logging";
 import { describes } from "../fixtures/describes";
 import { API, FakeTransport, INSTANCE_URL } from "../helpers/fake-transport";
 
@@ -588,5 +589,66 @@ describe("generate: field excludes", () => {
 		expect(create).toContain('"FirstName"');
 		expect(create).not.toContain('"LastName"');
 		expect(create).not.toContain('"Email"');
+	});
+});
+
+describe("generate logging", () => {
+	it("sends codegen events and the describe calls to a SalesforceLogger", async () => {
+		const cwd = tempDir();
+		const entries: { level: SalesforceLogLevel; event: SalesforceLogEvent }[] = [];
+		const logger = createLogger((level, _message, event) => {
+			entries.push({ level, event });
+		});
+		await generate(
+			{
+				output: "x.ts",
+				apiVersion: "v67.0",
+				sobjects: ["Account", "Broken"],
+				auth,
+				transport: orgTransport(["Broken"]),
+				continueOnDescribeError: true,
+			},
+			{ cwd, logger },
+		);
+		const codegen = entries.filter((entry) => entry.event.type.startsWith("codegen."));
+		expect(codegen.map(({ level, event }) => [level, event.type])).toEqual([
+			["info", "codegen.progress"],
+			["warn", "codegen.skip"],
+			["info", "codegen.progress"],
+			["info", "codegen.write"],
+		]);
+		expect(codegen[1]?.event).toMatchObject({
+			sobject: "Broken",
+			error: expect.stringMatching(/does not exist/) as string,
+		});
+		expect(entries.some(({ event }) => event.type === "http.request" && event.url.endsWith("/Account/describe"))).toBe(
+			true,
+		);
+	});
+});
+
+describe("generate with an async logger", () => {
+	it("resolves only after the logger's promises have settled", async () => {
+		const cwd = tempDir();
+		const finished: string[] = [];
+		const logger = createLogger(
+			(_level, message, event) =>
+				new Promise<void>((resolve) => {
+					setTimeout(() => {
+						if (event.type === "codegen.write") {
+							finished.push(message);
+						}
+						resolve();
+					}, 5);
+				}),
+		);
+		await generate(
+			{ output: "x.ts", apiVersion: "v67.0", sobjects: ["Account"], auth, transport: orgTransport() },
+			{
+				cwd,
+				logger,
+			},
+		);
+		expect(finished).toEqual([expect.stringMatching(/^Wrote 1 sObject type\(s\)/)]);
 	});
 });

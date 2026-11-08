@@ -122,7 +122,7 @@ The adapter has no `stream()`, so Bulk API results are read page by page.
 > };
 > ```
 
-## Timeouts, retries and hooks
+## Timeouts, retries and logging
 
 ```ts
 new SalesforceClient({
@@ -131,10 +131,7 @@ new SalesforceClient({
 	timeoutMs: 60_000, // per request; 0 disables it (default 120 000)
 	retry: { retries: 3, statusCodes: [429, 502, 503, 504], errorCodes: ["UNABLE_TO_LOCK_ROW"] }, // opt-in
 	headers: { "Sforce-Call-Options": "client=my-test-suite" },
-	hooks: {
-		onRequest: (event) => console.log(event.method, event.url), // Authorization is redacted
-		onResponse: (event) => console.log(event.status, `${event.durationMs}ms`),
-	},
+	logger: console, // requests, responses, token calls (redacted), retries; see logging.md
 });
 ```
 
@@ -148,72 +145,6 @@ new SalesforceClient({
 
 ### Logging requests and responses
 
-Hooks receive the bodies, so a hook can serve as a request logger. `onRequest` gets the request `body` as sent: JSON or form text, or bytes for binary uploads. `onResponse` gets that same request data plus the `responseBody`: text for JSON, XML, CSV and `text/*`, bytes otherwise. One `onResponse` call therefore has everything for a log entry:
+Pass a `logger` to see every request and response with bodies, token requests (redacted), retries and failures. `logger: console` works as-is. See [Logging](logging.md) for the events, filtering, `log: false`, and Allure and Playwright report examples.
 
-```ts
-new SalesforceClient({
-	auth,
-	apiVersion: "v66.0",
-	hooks: {
-		onResponse: (event) => {
-			console.log(`${event.method} ${event.url} → ${event.status} in ${event.durationMs} ms`);
-			if (typeof event.responseBody === "string") console.log(event.responseBody.slice(0, 500));
-		},
-	},
-});
-```
-
-A hook may return a promise, so async reporters fit directly. The promise is not awaited, and a rejection is ignored. For an Allure report (`allure-js-commons`), attach every call as JSON:
-
-```ts
-import * as allure from "allure-js-commons";
-import type { RequestHooks, ResponseEvent } from "@cerios/salesforce-sobjectly";
-
-function readable(body: string | Uint8Array | undefined): unknown {
-	if (typeof body !== "string") return body && `<${body.byteLength} bytes>`;
-	try {
-		return JSON.parse(body) as unknown;
-	} catch {
-		return body; // CSV, XML or plain text
-	}
-}
-
-function describeCall(event: ResponseEvent): { name: string; json: string } {
-	return {
-		name: `${event.method} ${new URL(event.url).pathname} → ${event.status}`,
-		json: JSON.stringify(
-			{
-				request: { method: event.method, url: event.url, attempt: event.attempt, body: readable(event.body) },
-				response: { status: event.status, durationMs: event.durationMs, body: readable(event.responseBody) },
-			},
-			null,
-			2,
-		),
-	};
-}
-
-export const allureHooks: RequestHooks = {
-	onResponse: (event) => {
-		const { name, json } = describeCall(event);
-		return allure.attachment(name, json, "application/json");
-	},
-};
-```
-
-In Playwright tests without Allure, attach it to the test instead:
-
-```ts
-import { test } from "@playwright/test";
-
-const playwrightHooks: RequestHooks = {
-	onResponse: (event) => {
-		const { name, json } = describeCall(event);
-		return test.info().attach(name, { body: json, contentType: "application/json" });
-	},
-};
-```
-
-- The `Authorization` header is redacted, and token requests (client credentials, JWT bearer, refresh token) never reach the hooks, so secrets can't end up in a report. `sfCli()` makes no HTTP calls at all.
-- Hooks fire once per attempt, so a retried request is logged once per try. `event.attempt` tells them apart.
-- Successful streamed responses (Bulk API query results over `fetchTransport`) have no `responseBody`, because the body hasn't been read yet when the hook fires. Error responses are buffered and do have one.
-- Bodies contain your record data. Treat reports and logs that include them accordingly.
+The older `hooks` option (`onRequest`/`onResponse`) still works but is deprecated. Its events are the logger's `http.request` and `http.response` events without `type`. [Logging](logging.md#migrating-from-hooks) shows how to move over.

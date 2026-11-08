@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 
 import { SalesforceAuthError } from "../errors";
+import { type AuthCliLogEvent, emit, type SalesforceLogger } from "../logging";
 
 import { CachingAuthProvider } from "./caching-provider";
 import type { AccessToken, AuthProvider } from "./types";
@@ -39,10 +40,11 @@ export function sfCli(options: SfCliOptions = {}): AuthProvider {
 		throw new TypeError(`sfCli(): invalid targetOrg "${options.targetOrg}".`);
 	}
 	const command = options.command ?? "sf";
-	const run = options.runCommand ?? runCommand;
+	const runner = options.runCommand ?? runCommand;
 	const target = options.targetOrg ? ["--target-org", options.targetOrg] : [];
 
-	return new CachingAuthProvider(async (): Promise<AccessToken> => {
+	return new CachingAuthProvider(async (context): Promise<AccessToken> => {
+		const run = logged(runner, context.logger);
 		const display = await callSf<{ instanceUrl?: string; accessToken?: string }>(run, command, [
 			"org",
 			"display",
@@ -72,7 +74,34 @@ export function sfCli(options: SfCliOptions = {}): AuthProvider {
 			);
 		}
 		return { accessToken: token.accessToken, instanceUrl };
-	});
+	}, "sfCli");
+}
+
+/** Logs each CLI run as `auth.cli`: the command and arguments only, never the output (it holds the token). */
+function logged(run: RunCommand, logger: SalesforceLogger | undefined): RunCommand {
+	if (!logger) {
+		return run;
+	}
+	return async (command, args) => {
+		const started = Date.now();
+		const event = (ok: boolean): AuthCliLogEvent => ({
+			type: "auth.cli",
+			command,
+			args: [...args],
+			durationMs: Date.now() - started,
+			ok,
+		});
+		try {
+			const stdout = await run(command, args);
+			const done = event(true);
+			emit(logger, "debug", `${[command, ...args].join(" ")} (${done.durationMs} ms)`, done);
+			return stdout;
+		} catch (error) {
+			const failed = event(false);
+			emit(logger, "debug", `${[command, ...args].join(" ")} failed (${failed.durationMs} ms)`, failed);
+			throw error;
+		}
+	};
 }
 
 async function callSf<T>(run: RunCommand, command: string, args: readonly string[]): Promise<T> {

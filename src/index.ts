@@ -21,6 +21,7 @@ export type {
 	ConnectionOptions,
 	QueryParamValue,
 	RequestEvent,
+	// oxlint-disable-next-line typescript/no-deprecated -- hooks stay supported, through the logger
 	RequestHooks,
 	ResponseEvent,
 	ResponseType,
@@ -185,3 +186,39 @@ export type * from "./types/common";
 export type * from "./types/describe";
 export type * from "./types/error-codes";
 export type * from "./types/platform";
+
+export { consoleLogger, createLogger, filterLogger, isConsoleLogger, isLevelEnabled } from "./logging";
+export type {
+	AuthCliLogEvent,
+	AuthErrorLogEvent,
+	AuthReauthenticateLogEvent,
+	AuthRefreshTokenRotatedLogEvent,
+	AuthRequestLogEvent,
+	AuthResponseLogEvent,
+	AuthTokenCachedLogEvent,
+	AuthTokenIssuedLogEvent,
+	BulkJobStateLogEvent,
+	CacheLogEvent,
+	CodegenProgressLogEvent,
+	CodegenSkipLogEvent,
+	CodegenWarningLogEvent,
+	CodegenWriteLogEvent,
+	ConsoleLoggerOptions,
+	FlushLogsOptions,
+	CustomLogEvent,
+	DebugLogsCapturedLogEvent,
+	DebugLogsTraceFlagLogEvent,
+	HttpErrorLogEvent,
+	HttpRequestLogEvent,
+	HttpResponseLogEvent,
+	HttpRetryLogEvent,
+	ReportStatusLogEvent,
+	RequestLogOptions,
+	SalesforceLogEvent,
+	SalesforceLogEventType,
+	SalesforceLogger,
+	SalesforceLoggerOption,
+	SalesforceLogHandler,
+	SalesforceLogLevel,
+	ToolingRunTestsLogEvent,
+} from "./logging";

@@ -1,5 +1,6 @@
 import { hasErrorCode } from "../errors";
 import { segment, sleep } from "../http/connection";
+import { emit, type SalesforceLogger } from "../logging";
 import { soqlEscape } from "../soql/escape";
 
 import type { ToolingApi } from "./tooling";
@@ -202,6 +203,11 @@ export class DebugLogsApi {
 				log.body = await this.body(log.id, { signal });
 			}
 		}
+		emit(this.logger, "info", `Captured ${logs.length} Apex log(s) for user ${userId}`, {
+			type: "debugLogs.captured",
+			userId,
+			count: logs.length,
+		});
 		if (failure) {
 			throw new DebugLogCaptureError(logs, failure.error, cleanupError);
 		}
@@ -248,13 +254,18 @@ export class DebugLogsApi {
 				},
 				{ signal },
 			);
-			return () => ignoreMissing(flags.delete(id));
+			this.logTraceFlag("created", userId, id);
+			return async () => {
+				await ignoreMissing(flags.delete(id));
+				this.logTraceFlag("deleted", userId, id);
+			};
 		}
 		await flags.update(
 			existing.Id,
 			{ DebugLevelId: debugLevelId, StartDate: null, ExpirationDate: expiration },
 			{ signal },
 		);
+		this.logTraceFlag("updated", userId, existing.Id);
 		return async () => {
 			if (Date.parse(existing.ExpirationDate) > Date.now()) {
 				await ignoreMissing(
@@ -264,11 +275,26 @@ export class DebugLogsApi {
 						ExpirationDate: existing.ExpirationDate,
 					}),
 				);
+				this.logTraceFlag("restored", userId, existing.Id);
 			} else {
 				// The original flag had already expired; an expired flag can't be restored, and it logged nothing.
 				await ignoreMissing(flags.delete(existing.Id));
+				this.logTraceFlag("deleted", userId, existing.Id);
 			}
 		};
+	}
+
+	private get logger(): SalesforceLogger | undefined {
+		return this._tooling.connection.logger;
+	}
+
+	private logTraceFlag(action: "created" | "updated" | "restored" | "deleted", userId: string, id: string): void {
+		emit(this.logger, "info", `${action[0].toUpperCase()}${action.slice(1)} trace flag ${id} for user ${userId}`, {
+			type: "debugLogs.traceFlag",
+			action,
+			userId,
+			traceFlagId: id,
+		});
 	}
 }
 

@@ -1,11 +1,13 @@
 import { SalesforceBulkJobError } from "../errors";
 import { type SalesforceConnection, segment, sleep } from "../http/connection";
+import { emit, type SalesforceLogger } from "../logging";
 import type { ExternalIdField, SObjectFieldName, SObjectName, SObjectRecord } from "../registry";
 import type { NoSelection, SoqlQueryBuilder, SoqlQueryRecord } from "../soql/query-builder";
 import type {
 	BulkColumnDelimiter,
 	BulkIngestOperation,
 	BulkJobInfo,
+	BulkJobState,
 	BulkLineEnding,
 	BulkQueryOperation,
 } from "../types/api";
@@ -140,7 +142,7 @@ export class BulkIngestJob {
 
 	/** Polls until the job is `JobComplete`. Throws `SalesforceBulkJobError` on `Failed`, `Aborted` or timeout. */
 	waitForCompletion(options: WaitOptions = {}): Promise<BulkJobInfo> {
-		return waitForJob(this, options);
+		return waitForJob(this, options, this._connection.logger);
 	}
 
 	/** Successfully processed rows: `sf__Id`, `sf__Created` and the uploaded columns. */
@@ -201,7 +203,7 @@ export class BulkQueryJob<TRow = Record<string, string>> {
 
 	/** Polls until the job is `JobComplete`. Throws `SalesforceBulkJobError` on `Failed`, `Aborted` or timeout. */
 	waitForCompletion(options: WaitOptions = {}): Promise<BulkJobInfo> {
-		return waitForJob(this, options);
+		return waitForJob(this, options, this._connection.logger);
 	}
 
 	async abort(options: { signal?: AbortSignal } = {}): Promise<BulkJobInfo> {
@@ -404,11 +406,28 @@ function withSignal(wait: WaitOptions, signal: AbortSignal | undefined): WaitOpt
 async function waitForJob(
 	job: { id: string; info: BulkJobInfo; refresh(options: { signal?: AbortSignal }): Promise<BulkJobInfo> },
 	options: WaitOptions,
+	logger: SalesforceLogger | undefined,
 ): Promise<BulkJobInfo> {
 	const interval = options.pollIntervalMs ?? 2_000;
 	const deadline = Date.now() + (options.timeoutMs ?? 10 * 60_000);
+	let previous: BulkJobState | undefined;
 	for (;;) {
 		const info = await job.refresh({ signal: options.signal });
+		const changed = info.state !== previous;
+		previous = info.state;
+		emit(
+			logger,
+			changed ? "info" : "debug",
+			`Bulk job ${job.id} is ${info.state} (${info.numberRecordsProcessed ?? 0} processed, ${info.numberRecordsFailed ?? 0} failed)`,
+			{
+				type: "bulk.jobState",
+				jobId: job.id,
+				state: info.state,
+				changed,
+				numberRecordsProcessed: info.numberRecordsProcessed,
+				numberRecordsFailed: info.numberRecordsFailed,
+			},
+		);
 		if (info.state === "JobComplete") {
 			return info;
 		}

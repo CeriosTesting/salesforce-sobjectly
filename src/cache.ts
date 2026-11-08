@@ -1,3 +1,4 @@
+import { emit, type SalesforceLogger } from "./logging";
 import { share, type SharedRequest } from "./shared";
 
 /**
@@ -8,7 +9,11 @@ import { share, type SharedRequest } from "./shared";
 export class MetadataCache {
 	private readonly _entries = new Map<string, SharedRequest<unknown>>();
 
-	constructor(private readonly _enabled: boolean = true) {}
+	/** With a `logger`, every lookup is logged as `cache.hit` or `cache.miss` (`debug`). */
+	constructor(
+		private readonly _enabled: boolean = true,
+		private readonly _logger?: SalesforceLogger,
+	) {}
 
 	/**
 	 * Returns the cached value for `key`, or loads (and caches) it. `load` receives a signal of
@@ -19,6 +24,11 @@ export class MetadataCache {
 			return load(signal);
 		}
 		let entry = this._entries.get(key) as SharedRequest<T> | undefined;
+		const hit = entry !== undefined && !entry.abandoned;
+		emit(this._logger, "debug", `Metadata cache ${hit ? "hit" : "miss"}: ${key}`, {
+			type: hit ? "cache.hit" : "cache.miss",
+			key,
+		});
 		if (!entry || entry.abandoned) {
 			const created = share<T>((ownSignal) => load(ownSignal));
 			this._entries.set(key, created);

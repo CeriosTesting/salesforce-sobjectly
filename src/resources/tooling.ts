@@ -1,4 +1,5 @@
 import type { RestRequest, SalesforceConnection } from "../http/connection";
+import { emit } from "../logging";
 import type { GenericRegistry } from "../registry";
 import type { ExecuteAnonymousResult, RunTestsRequest } from "../types/api";
 import type { GenericRecord } from "../types/common";
@@ -131,24 +132,37 @@ export class ToolingApi {
 	}
 
 	/** Runs Apex tests synchronously (a single class) and returns the results. */
-	runTestsSynchronous(request: RunTestsRequest, options: { signal?: AbortSignal } = {}): Promise<RunTestsResult> {
-		return this._connection.request({
+	async runTestsSynchronous(request: RunTestsRequest, options: { signal?: AbortSignal } = {}): Promise<RunTestsResult> {
+		const result = await this._connection.request<RunTestsResult>({
 			method: "POST",
 			path: "/tooling/runTestsSynchronous/",
 			body: request,
 			signal: options.signal,
 			timeoutMs: 0,
 		});
+		emit(
+			this._connection.logger,
+			"info",
+			`Ran ${result.numTestsRun} Apex test(s): ${result.numFailures} failure(s) in ${result.totalTime} ms`,
+			{ type: "tooling.runTests", mode: "sync", numTestsRun: result.numTestsRun, numFailures: result.numFailures },
+		);
+		return result;
 	}
 
 	/** Enqueues Apex tests and returns the AsyncApexJob id. */
-	runTestsAsynchronous(request: RunTestsRequest, options: { signal?: AbortSignal } = {}): Promise<string> {
-		return this._connection.request({
+	async runTestsAsynchronous(request: RunTestsRequest, options: { signal?: AbortSignal } = {}): Promise<string> {
+		const jobId = await this._connection.request<string>({
 			method: "POST",
 			path: "/tooling/runTestsAsynchronous/",
 			body: request,
 			signal: options.signal,
 		});
+		emit(this._connection.logger, "info", `Enqueued Apex tests as job ${jobId}`, {
+			type: "tooling.runTests",
+			mode: "async",
+			jobId,
+		});
+		return jobId;
 	}
 
 	/** Any other Tooling resource; `path` is relative to `/tooling`. */

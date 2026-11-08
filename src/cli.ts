@@ -9,6 +9,7 @@ import { checkGenerated, findConfigFiles, generate, loadConfig } from "./codegen
 import { type InitAnswers, parseSObjects, runInit } from "./codegen/init";
 import { readlinePrompter } from "./codegen/prompter";
 import { PICKLIST_MODES } from "./codegen/validate-config";
+import { filterLogger, type SalesforceLogger } from "./logging";
 
 const HELP = `Usage: sobjectly <command> [options]
 
@@ -22,6 +23,7 @@ Options for generate:
       --check               Don't write; exit with 1 when the generated file is out of date
                             (formatting-only differences don't count)
       --stdout              Print the generated source instead of writing it
+  -v, --verbose             Also print every Salesforce request and token call (to stderr)
 
 Options for init (skip the matching questions; useful in scripts):
       --api-version <v>     Salesforce API version, e.g. v66.0
@@ -48,6 +50,7 @@ const options = {
 	format: { type: "string" },
 	check: { type: "boolean" },
 	stdout: { type: "boolean" },
+	verbose: { type: "boolean", short: "v" },
 	"target-org": { type: "string" },
 	yes: { type: "boolean", short: "y" },
 	force: { type: "boolean", short: "f" },
@@ -65,6 +68,7 @@ interface Values {
 	format?: string;
 	check?: boolean;
 	stdout?: boolean;
+	verbose?: boolean;
 	"target-org"?: string;
 	yes?: boolean;
 	force?: boolean;
@@ -164,7 +168,13 @@ async function runGenerate(values: Values): Promise<number> {
 	const log = values.stdout
 		? (message: string): void => console.error(message)
 		: (message: string): void => console.log(message);
-	const logger = { info: log, warn: (message: string): void => console.warn(`warning: ${message}`) };
+	const output: SalesforceLogger = {
+		info: log,
+		warn: (message: string): void => console.warn(`warning: ${message}`),
+		debug: (message: string): void => console.error(message),
+	};
+	// Without --verbose only codegen progress and warnings show, not every request.
+	const logger = values.verbose ? output : filterLogger(output, (_level, event) => event.type.startsWith("codegen."));
 	if (values.check) {
 		return reportCheck(await checkGenerated(config, { cwd: directory, logger }));
 	}

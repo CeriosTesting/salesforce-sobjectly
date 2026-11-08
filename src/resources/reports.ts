@@ -1,4 +1,5 @@
 import { type SalesforceConnection, segment, sleep } from "../http/connection";
+import { emit } from "../logging";
 import type {
 	ReportDataCell,
 	ReportDescribe,
@@ -94,6 +95,13 @@ export class ReportsApi {
 		for (;;) {
 			const result = await this.instance(reportId, instanceId, { signal: options.signal });
 			const status = result.attributes.status;
+			const finished = status === "Success" || status === "Error";
+			emit(
+				this._connection.logger,
+				finished ? "info" : "debug",
+				`Report run ${instanceId} of report ${reportId} is ${status ?? "pending"}`,
+				{ type: "report.status", reportId, instanceId, status },
+			);
 			if (status === "Success") {
 				return result;
 			}

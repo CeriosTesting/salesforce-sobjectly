@@ -6,6 +6,14 @@ import { accessToken, clientCredentials, jwtBearer } from "../auth/providers";
 import { sfCli } from "../auth/sf-cli";
 import type { AuthProvider } from "../auth/types";
 import { SalesforceClient } from "../client";
+import {
+	combineLoggers,
+	emit,
+	PendingLogs,
+	type SalesforceLogger,
+	type SalesforceLoggerOption,
+	toLoggers,
+} from "../logging";
 import type { ApiVersion } from "../types/common";
 import type { DescribeSObjectResult } from "../types/describe";
 
@@ -47,15 +55,32 @@ export type { InitAnswers, InitAuthType, InitConfigFormat, InitOptions, InitResu
 export { readlinePrompter } from "./prompter";
 export type { Choice, Prompter } from "./prompter";
 
-export interface CodegenLogger {
-	info(message: string): void;
-	warn(message: string): void;
-}
+/**
+ * The codegen logger: any `SalesforceLogger` (only `info` and `warn` are needed for progress).
+ *
+ * @deprecated Use `SalesforceLogger`.
+ */
+export type CodegenLogger = SalesforceLogger;
+
+export { consoleLogger, createLogger, filterLogger, isConsoleLogger, isLevelEnabled } from "../logging";
+export type {
+	ConsoleLoggerOptions,
+	FlushLogsOptions,
+	SalesforceLogEvent,
+	SalesforceLogger,
+	SalesforceLoggerOption,
+	SalesforceLogHandler,
+	SalesforceLogLevel,
+} from "../logging";
 
 export interface GenerateOptions {
 	/** Directory that `output` is resolved against. Defaults to `process.cwd()`. */
 	cwd?: string;
-	logger?: CodegenLogger;
+	/**
+	 * Receives progress (`info`), warnings (`warn`) and, with `debug`, the HTTP and auth calls made
+	 * while describing. A `{ info, warn }` object or `console` works.
+	 */
+	logger?: SalesforceLoggerOption;
 	/** Where `"${NAME}"` placeholders and the default `SF_*` variables are read from. Defaults to `process.env`. */
 	env?: Record<string, string | undefined>;
 	/** Write the file. Defaults to `true`; with `false` the source is only returned. */
@@ -86,12 +111,25 @@ export interface CheckResult {
 	changed: string[];
 }
 
-const silentLogger: CodegenLogger = { info: () => undefined, warn: () => undefined };
-
 /** Describes the configured sObjects and writes the generated types to `config.output`. */
 export async function generate(input: CodegenConfig, options: GenerateOptions = {}): Promise<GenerateResult> {
-	const logger = options.logger ?? silentLogger;
-	const built = await buildSource(input, options);
+	const pending = new PendingLogs();
+	const loggers = toLoggers(options.logger).map((logger) => pending.track(logger));
+	try {
+		return await generateWith(input, options, loggers);
+	} finally {
+		// Resolve only once async loggers (e.g. a report) have finished.
+		await pending.flush();
+	}
+}
+
+async function generateWith(
+	input: CodegenConfig,
+	options: GenerateOptions,
+	loggers: SalesforceLogger[],
+): Promise<GenerateResult> {
+	const logger = combineLoggers(...loggers);
+	const built = await buildSource(input, options, loggers);
 	const { config } = built;
 	let source = built.raw;
 	if (config.format) {
@@ -99,7 +137,11 @@ export async function generate(input: CodegenConfig, options: GenerateOptions = 
 	}
 	if (options.write !== false) {
 		await writeAtomically(built.outputPath, source);
-		logger.info(`Wrote ${built.sobjects.length} sObject type(s) to ${built.outputPath}`);
+		emit(logger, "info", `Wrote ${built.sobjects.length} sObject type(s) to ${built.outputPath}`, {
+			type: "codegen.write",
+			outputPath: built.outputPath,
+			count: built.sobjects.length,
+		});
 	}
 	const { contentHash } = readGeneratedHashes(built.raw) as GeneratedFileHashes;
 	return {
@@ -117,7 +159,21 @@ export async function generate(input: CodegenConfig, options: GenerateOptions = 
  * Only content counts: a file reformatted by Prettier, oxfmt or the `format` hook is up to date.
  */
 export async function checkGenerated(input: CodegenConfig, options: GenerateOptions = {}): Promise<CheckResult> {
-	const built = await buildSource(input, options);
+	const pending = new PendingLogs();
+	const loggers = toLoggers(options.logger).map((logger) => pending.track(logger));
+	try {
+		return await checkWith(input, options, loggers);
+	} finally {
+		await pending.flush();
+	}
+}
+
+async function checkWith(
+	input: CodegenConfig,
+	options: GenerateOptions,
+	loggers: SalesforceLogger[],
+): Promise<CheckResult> {
+	const built = await buildSource(input, options, loggers);
 	const empty = { outputPath: built.outputPath, added: [], removed: [], changed: [] };
 	if (!existsSync(built.outputPath)) {
 		return { ...empty, upToDate: false, reason: "missing" };
@@ -139,6 +195,7 @@ export async function checkGenerated(input: CodegenConfig, options: GenerateOpti
 async function buildSource(
 	input: CodegenConfig,
 	options: GenerateOptions,
+	loggers: SalesforceLogger[],
 ): Promise<{
 	config: CodegenConfig;
 	outputPath: string;
@@ -148,19 +205,27 @@ async function buildSource(
 }> {
 	const config = validateConfig(input, { source: "generate()" });
 	const { apiVersion } = config;
-	const logger = options.logger ?? silentLogger;
+	const logger = combineLoggers(...loggers);
 	const env = options.env ?? process.env;
 	const outputPath = isAbsolute(config.output) ? config.output : resolve(options.cwd ?? process.cwd(), config.output);
 
 	const client = new SalesforceClient({
-		auth: resolveAuth(config.auth, env, { warn: (message) => logger.warn(message) }),
+		auth: resolveAuth(config.auth, env, {
+			warn: (message) => emit(logger, "warn", message, { type: "codegen.warning" }),
+		}),
 		apiVersion,
 		transport: config.transport,
 		retry: true,
+		logger: loggers,
 	});
 
 	const names = await resolveSObjectNames(client, config, logger);
-	logger.info(`Describing ${names.length} sObject(s) with API ${apiVersion}...`);
+	emit(logger, "info", `Describing ${names.length} sObject(s) with API ${apiVersion}...`, {
+		type: "codegen.progress",
+		done: 0,
+		total: names.length,
+		apiVersion,
+	});
 	const { describes, skipped } = await describeAll(client, names, config, logger);
 
 	const raw = generateSource(describes, {
@@ -396,7 +461,7 @@ function throwIfMissing(type: string, problems: readonly string[]): void {
 async function resolveSObjectNames(
 	client: SalesforceClient,
 	config: CodegenConfig,
-	logger: CodegenLogger,
+	logger: SalesforceLogger | undefined,
 ): Promise<string[]> {
 	// sObject names are case-insensitive in Salesforce.
 	const exclude = new Set((config.exclude ?? []).map((name) => name.toLowerCase()));
@@ -409,7 +474,9 @@ async function resolveSObjectNames(
 		}
 		return [...unique.entries()].filter(([key]) => !exclude.has(key)).map(([, name]) => name);
 	}
-	logger.warn("No `sobjects` configured: generating every queryable sObject. Consider an explicit list.");
+	emit(logger, "warn", "No `sobjects` configured: generating every queryable sObject. Consider an explicit list.", {
+		type: "codegen.warning",
+	});
 	const global = await client.describeGlobal();
 	return global.sobjects
 		.filter((sobject) => sobject.queryable && !sobject.deprecatedAndHidden && !exclude.has(sobject.name.toLowerCase()))
@@ -420,7 +487,7 @@ async function describeAll(
 	client: SalesforceClient,
 	names: readonly string[],
 	config: CodegenConfig,
-	logger: CodegenLogger,
+	logger: SalesforceLogger | undefined,
 ): Promise<{ describes: CodegenDescribe[]; skipped: GenerateResult["skipped"] }> {
 	const concurrency = Math.max(1, config.concurrency ?? 10);
 	const describes: CodegenDescribe[] = [];
@@ -445,12 +512,21 @@ async function describeAll(
 					failed.abort();
 					throw new Error(`Describing sObject "${name}" failed: ${message}`, { cause: error });
 				}
-				logger.warn(`Skipping sObject "${name}": ${message}`);
+				emit(logger, "warn", `Skipping sObject "${name}": ${message}`, {
+					type: "codegen.skip",
+					sobject: name,
+					error: message,
+				});
 				skipped.push({ name, error: message });
 			}
 			done++;
 			if (done % 10 === 0 || done === names.length) {
-				logger.info(`Described ${done}/${names.length} sObject(s)`);
+				emit(logger, "info", `Described ${done}/${names.length} sObject(s)`, {
+					type: "codegen.progress",
+					done,
+					total: names.length,
+					apiVersion: config.apiVersion,
+				});
 			}
 		}
 	};

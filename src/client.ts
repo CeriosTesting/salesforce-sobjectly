@@ -10,6 +10,7 @@ import {
 } from "./http/connection";
 import { fetchTransport } from "./http/fetch-transport";
 import type { HttpMethod, HttpTransport } from "./http/transport";
+import type { FlushLogsOptions, RequestLogOptions, SalesforceLoggerOption } from "./logging";
 import type { GenericRegistry, SObjectName } from "./registry";
 import { ActionsApi } from "./resources/actions";
 import { ApprovalsApi } from "./resources/approvals";
@@ -50,7 +51,21 @@ export interface SalesforceClientOptions {
 	allowedOrigins?: string[];
 	/** Headers sent with every request, e.g. `{ "Sforce-Call-Options": "client=my-app" }`. */
 	headers?: Record<string, string>;
-	/** Observability hooks, e.g. for logging request and response bodies. Tokens are redacted. */
+	/**
+	 * Receives everything the client does: requests and responses (with bodies), token requests
+	 * (secrets redacted), retries, failures, metadata cache use and long-running operations.
+	 * Pass one logger or several, e.g. `[consoleLogger(), allureLogger]`. `console` works as-is; see
+	 * `createLogger` for custom sinks such as test reports and `consoleLogger({ enabled })` for a
+	 * console you can switch off. Keep a request out of every logger with `log: false`, or off the
+	 * console only with `log: { console: false }`.
+	 */
+	logger?: SalesforceLoggerOption;
+	/**
+	 * Observability hooks, e.g. for logging request and response bodies. Tokens are redacted.
+	 *
+	 * @deprecated Use `logger`: its `http.request`/`http.response` events carry the same data.
+	 */
+	// oxlint-disable-next-line typescript/no-deprecated -- hooks stay supported, through the logger
 	hooks?: RequestHooks;
 	/**
 	 * Cache metadata (describe, UI API object info, record type ids) in memory for the lifetime of
@@ -122,6 +137,8 @@ export class SalesforceClient<R extends object = GenericRegistry> {
 			retry: options.retry,
 			allowedOrigins: options.allowedOrigins,
 			headers: options.headers,
+			logger: options.logger,
+			// oxlint-disable-next-line typescript/no-deprecated -- hooks stay supported, through the logger
 			hooks: options.hooks,
 		});
 		this._queries = new QueryApi(this.connection);
@@ -132,7 +149,7 @@ export class SalesforceClient<R extends object = GenericRegistry> {
 		this.tooling = new ToolingApi(this.connection);
 		this.bulk = new BulkApi<R>(this.connection);
 		this.events = new EventsApi<R>(this.connection);
-		this._cache = new MetadataCache(options.cache !== false);
+		this._cache = new MetadataCache(options.cache !== false, this.connection.logger);
 		this.approvals = new ApprovalsApi(this.connection, this._queries);
 		this.quickActions = new QuickActionsApi(this.connection, "/quickActions");
 		this.uiApi = new UiApi<R>(this.connection, this._cache);
@@ -146,6 +163,20 @@ export class SalesforceClient<R extends object = GenericRegistry> {
 		this._cache.clear();
 	}
 
+	/**
+	 * Waits for the promises your loggers returned, e.g. report attachments still being written.
+	 * Requests never wait for them, so call this before a test ends or the process exits:
+	 *
+	 * ```ts
+	 * afterEach(() => sf.flushLogs({ timeoutMs: 5_000 }));
+	 * ```
+	 *
+	 * Rejections are ignored. Resolves `false` if `timeoutMs` passed first, `true` otherwise.
+	 */
+	flushLogs(options?: FlushLogsOptions): Promise<boolean> {
+		return this.connection.flushLogs(options);
+	}
+
 	get apiVersion(): ApiVersion {
 		return this.connection.apiVersion;
 	}
@@ -155,9 +186,12 @@ export class SalesforceClient<R extends object = GenericRegistry> {
 		return this.connection.apiUsage;
 	}
 
-	/** The instance URL of the current access token (authenticates if needed). */
-	instanceUrl(options: { signal?: AbortSignal } = {}): Promise<string> {
-		return this.connection.instanceUrl(options.signal);
+	/**
+	 * The instance URL of the current access token (authenticates if needed). With `log: false`,
+	 * a token request this triggers is not logged.
+	 */
+	instanceUrl(options: { signal?: AbortSignal; log?: boolean | RequestLogOptions } = {}): Promise<string> {
+		return this.connection.instanceUrl(options.signal, { log: options.log });
 	}
 
 	/**
