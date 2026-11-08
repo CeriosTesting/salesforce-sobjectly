@@ -16,7 +16,7 @@ You can expect a first response within 5 working days.
 
 ## Design notes
 
-- Access tokens, client secrets and private keys are never included in error messages or passed to hooks. The `Authorization` header is redacted.
+- Access tokens, client secrets and private keys are never included in error messages or passed to hooks or loggers. The `Authorization` header is redacted, token requests reach a logger only with every credential and token replaced by `[REDACTED]`, and `sfCli()` output is never logged.
 - Absolute URLs (such as `nextRecordsUrl`) are only followed on the authenticated instance origin, unless `allowedOrigins` says otherwise.
 - `SalesforceError.path` leaves out the query string, because SOQL in a query string can contain personal data.
 - Values passed to the typed SOQL methods are escaped. Values you interpolate into `whereRaw`/`selectRaw` must be escaped with `soqlEscape`.

@@ -1,5 +1,6 @@
 import { hasErrorCode } from "../errors";
 import { segment, sleep } from "../http/connection";
+import { emit, type RequestLogOptions, type SalesforceLogger } from "../logging";
 import { soqlEscape } from "../soql/escape";
 
 import type { ToolingApi } from "./tooling";
@@ -58,6 +59,13 @@ export interface CaptureLogsOptions {
 	/** How long the trace flag stays active if cleanup fails. Defaults to 30 minutes (max 24 hours). */
 	expirationMinutes?: number;
 	signal?: AbortSignal;
+	/**
+	 * Log the calls the capture makes itself (user, logs, debug level, trace flag) and its
+	 * `debugLogs.*` events (`true`), keep them out of the log (`false`) or off the console only
+	 * (`{ console: false }`). Defaults to the client's (or `withLog` view's) setting. `work` logs as
+	 * the client it uses does.
+	 */
+	log?: boolean | RequestLogOptions;
 }
 
 export interface CaptureLogsResult<T> {
@@ -105,10 +113,23 @@ const LOG_FIELDS = "Id, Operation, Request, Status, StartTime, DurationMilliseco
 
 /** Apex debug logs through the Tooling API: capture the logs of a block of work, list and read logs. */
 export class DebugLogsApi {
-	/** The latest capture per user: a user has one trace flag, so captures for a user take turns. */
-	private readonly _captures = new Map<string, Promise<void>>();
+	/**
+	 * `_captures` holds the latest capture per user: a user has one trace flag, so captures for a
+	 * user take turns. A `withLog` view shares it with its client.
+	 */
+	constructor(
+		private readonly _tooling: ToolingApi,
+		private readonly _captures = new Map<string, Promise<void>>(),
+	) {}
 
-	constructor(private readonly _tooling: ToolingApi) {}
+	/**
+	 * The capture queue, for `withLog` views of the client.
+	 *
+	 * @internal
+	 */
+	get captures(): Map<string, Promise<void>> {
+		return this._captures;
+	}
 
 	/** The id of the authenticated user (from `/services/oauth2/userinfo`). */
 	async currentUserId(options: { signal?: AbortSignal } = {}): Promise<string> {
@@ -153,6 +174,10 @@ export class DebugLogsApi {
 	 * runs later. At most the 200 newest logs of the user are collected.
 	 */
 	async capture<T>(work: () => Promise<T>, options: CaptureLogsOptions = {}): Promise<CaptureLogsResult<T>> {
+		if (options.log !== undefined) {
+			// The same capture queue, through a connection with this log setting.
+			return this._tooling.withLog(options.log).debugLogs.capture(work, { ...options, log: undefined });
+		}
 		const userId = options.userId ?? (await this.currentUserId({ signal: options.signal }));
 		const previous = this._captures.get(userId) ?? Promise.resolve();
 		const current = previous.then(() => this.captureFor(userId, work, options));
@@ -202,6 +227,11 @@ export class DebugLogsApi {
 				log.body = await this.body(log.id, { signal });
 			}
 		}
+		emit(this.logger, "info", `Captured ${logs.length} Apex log(s) for user ${userId}`, {
+			type: "debugLogs.captured",
+			userId,
+			count: logs.length,
+		});
 		if (failure) {
 			throw new DebugLogCaptureError(logs, failure.error, cleanupError);
 		}
@@ -248,13 +278,18 @@ export class DebugLogsApi {
 				},
 				{ signal },
 			);
-			return () => ignoreMissing(flags.delete(id));
+			this.logTraceFlag("created", userId, id);
+			return async () => {
+				await ignoreMissing(flags.delete(id));
+				this.logTraceFlag("deleted", userId, id);
+			};
 		}
 		await flags.update(
 			existing.Id,
 			{ DebugLevelId: debugLevelId, StartDate: null, ExpirationDate: expiration },
 			{ signal },
 		);
+		this.logTraceFlag("updated", userId, existing.Id);
 		return async () => {
 			if (Date.parse(existing.ExpirationDate) > Date.now()) {
 				await ignoreMissing(
@@ -264,11 +299,26 @@ export class DebugLogsApi {
 						ExpirationDate: existing.ExpirationDate,
 					}),
 				);
+				this.logTraceFlag("restored", userId, existing.Id);
 			} else {
 				// The original flag had already expired; an expired flag can't be restored, and it logged nothing.
 				await ignoreMissing(flags.delete(existing.Id));
+				this.logTraceFlag("deleted", userId, existing.Id);
 			}
 		};
+	}
+
+	private get logger(): SalesforceLogger | undefined {
+		return this._tooling.connection.logger;
+	}
+
+	private logTraceFlag(action: "created" | "updated" | "restored" | "deleted", userId: string, id: string): void {
+		emit(this.logger, "info", `${action[0].toUpperCase()}${action.slice(1)} trace flag ${id} for user ${userId}`, {
+			type: "debugLogs.traceFlag",
+			action,
+			userId,
+			traceFlagId: id,
+		});
 	}
 }
 

@@ -59,6 +59,7 @@ This flow authenticates as a specific user with a certificate uploaded to the ap
 
 ```ts
 import { readFileSync } from "node:fs";
+
 import { jwtBearer } from "@cerios/salesforce-sobjectly";
 
 const auth = jwtBearer({
@@ -92,6 +93,7 @@ const auth = refreshToken({
 ```ts
 import { SalesforceClient } from "@cerios/salesforce-sobjectly";
 import { loadAuth } from "@cerios/salesforce-sobjectly/codegen";
+
 import { API_VERSION, type SObjectRegistry } from "./generated/sobjects";
 
 const sf = new SalesforceClient<SObjectRegistry>({ apiVersion: API_VERSION, auth: await loadAuth() });
@@ -123,5 +125,5 @@ You can also implement the `AuthProvider` interface directly: `getToken(context)
 ## Notes
 
 - Token requests go through the client's transport, so a custom transport (proxy, logging) also applies to them.
-- Secrets and tokens are never included in errors or passed to hooks. The `Authorization` header is redacted in `onRequest` events.
+- Secrets and tokens are never included in errors or passed to hooks. A [logger](logging.md) sees token requests, but with every credential and token replaced by `[REDACTED]`. The `Authorization` header is always redacted.
 - The username-password flow and SOAP `login()` are not supported: Salesforce blocks or retires both.

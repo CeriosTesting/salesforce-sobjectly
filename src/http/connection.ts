@@ -1,6 +1,19 @@
 import { assertApiVersion } from "../api-version";
 import type { AccessToken, AuthProvider } from "../auth/types";
 import { SalesforceError } from "../errors";
+import {
+	combineLoggers,
+	emit,
+	errorText,
+	hooksLogger,
+	type FlushLogsOptions,
+	isConsoleLogger,
+	PendingLogs,
+	type RequestLogOptions,
+	type SalesforceLogger,
+	type SalesforceLoggerOption,
+	toLoggers,
+} from "../logging";
 import { formatNumber } from "../soql/escape";
 import type { ApiVersion, RestError } from "../types/common";
 import type { SalesforceErrorCode } from "../types/error-codes";
@@ -42,6 +55,12 @@ export interface RestRequest {
 	timeoutMs?: number;
 	/** Allow retries (see `RetryOptions`) for this request even when the method is not idempotent. */
 	retry?: boolean;
+	/**
+	 * `false` keeps this request out of every logger (and the hooks), e.g. for a call that returns
+	 * credentials. `{ console: false }` only keeps it off the console, while your other loggers
+	 * still get it. A token request it triggers follows the same setting. Defaults to `true`.
+	 */
+	log?: boolean | RequestLogOptions;
 }
 
 export interface RestResponse<T> {
@@ -93,6 +112,9 @@ export interface ResponseEvent extends RequestEvent {
 /**
  * Observability hooks, e.g. for logging requests and responses in test reports. Tokens are never
  * passed to hooks. A hook may return a promise; it is not awaited, and a rejection is ignored.
+ *
+ * @deprecated Use `logger` (`SalesforceLogger`): it receives the same `http.request` and
+ * `http.response` events plus token requests, retries, failures and more. Hooks keep working.
  */
 export interface RequestHooks {
 	onRequest?(event: RequestEvent): void | Promise<void>;
@@ -117,10 +139,25 @@ export interface ConnectionOptions {
 	allowedOrigins?: string[];
 	/** Headers sent with every request, e.g. `{ "Sforce-Call-Options": "client=my-app" }`. */
 	headers?: Record<string, string>;
+	/** Receives requests, responses, token requests (redacted), retries and failures. One logger or several. */
+	logger?: SalesforceLoggerOption;
+	/**
+	 * Whether calls are logged when they don't say so themselves. Defaults to `false`: nothing is
+	 * logged until a call, a `withLog` view or this option turns it on. `{ console: false }` logs to
+	 * the custom loggers only. Hooks keep firing unless this (or a call) is explicitly `false`.
+	 */
+	log?: boolean | RequestLogOptions;
+	/** @deprecated Use `logger`. */
+	// oxlint-disable-next-line typescript/no-deprecated -- hooks stay supported, through the logger
 	hooks?: RequestHooks;
 }
 
 type StartedEvent = RequestEvent & { started: number };
+
+interface Prepared {
+	transportRequest: Parameters<HttpTransport["send"]>[0];
+	event: StartedEvent;
+}
 
 interface ResolvedRetry {
 	retries: number;
@@ -140,8 +177,19 @@ export class SalesforceConnection {
 	private readonly _retry: ResolvedRetry | undefined;
 	private readonly _allowedOrigins: Set<string>;
 	private readonly _headers: Record<string, string>;
-	private readonly _hooks: RequestHooks;
-	private _apiUsage: ApiUsage | undefined;
+	/** Every logger and the hooks. */
+	private readonly _logger: SalesforceLogger | undefined;
+	/** Every logger except the console ones, and the hooks, for `log: { console: false }`. */
+	private readonly _quietLogger: SalesforceLogger | undefined;
+	/** The hooks alone: they fire while logging is off by default, but not with an explicit `log: false`. */
+	private readonly _hooksLogger: SalesforceLogger | undefined;
+	private readonly _pendingLogs = new PendingLogs();
+	/** State every `withLog` view of this connection shares. */
+	private readonly _shared: { apiUsage?: ApiUsage } = {};
+	/** The log setting for calls that don't pass `log`; `undefined` means off, but hooks still fire. */
+	private _defaultLog: boolean | RequestLogOptions | undefined;
+	/** Set on `withLogger` forks: every call logs to exactly this logger. */
+	private _fixedLogger: { logger: SalesforceLogger | undefined } | undefined;
 
 	constructor(options: ConnectionOptions) {
 		assertApiVersion(
@@ -156,21 +204,93 @@ export class SalesforceConnection {
 		this._retry = resolveRetry(options.retry);
 		this._allowedOrigins = new Set((options.allowedOrigins ?? []).map((origin) => new URL(origin).origin));
 		this._headers = options.headers ?? {};
-		this._hooks = options.hooks ?? {};
+		// oxlint-disable-next-line typescript/no-deprecated -- hooks stay supported, through the logger
+		const hooks = hooksLogger(options.hooks);
+		this._hooksLogger = hooks && this._pendingLogs.track(hooks);
+		const loggers = toLoggers(options.logger).map((logger) => this._pendingLogs.track(logger));
+		this._logger = combineLoggers(...loggers, this._hooksLogger);
+		this._quietLogger = combineLoggers(...loggers.filter((logger) => !isConsoleLogger(logger)), this._hooksLogger);
+		this._defaultLog = options.log;
 	}
 
 	/** API usage as reported by the last response's `Sforce-Limit-Info` header. */
 	get apiUsage(): ApiUsage | undefined {
-		return this._apiUsage;
+		return this._shared.apiUsage;
 	}
 
 	get transport(): HttpTransport {
 		return this._transport;
 	}
 
-	/** Returns the instance URL of the current token (authenticating if needed). */
-	async instanceUrl(signal?: AbortSignal): Promise<string> {
-		const token = await this._auth.getToken({ transport: this._transport, signal });
+	/**
+	 * The logger for calls that don't pass `log`, honoring this connection's log setting (and its
+	 * `withLog` view). For resources and extensions that log events of their own.
+	 */
+	get logger(): SalesforceLogger | undefined {
+		return this.loggerFor(undefined);
+	}
+
+	/**
+	 * The logger for a call with this `log` setting: a call's own `log` wins over the view's or
+	 * client's default. `undefined` when nothing should be logged.
+	 */
+	loggerFor(log: boolean | RequestLogOptions | undefined): SalesforceLogger | undefined {
+		if (this._fixedLogger) {
+			return this._fixedLogger.logger;
+		}
+		const setting = log ?? this._defaultLog;
+		if (setting === undefined || setting === false) {
+			// Logging is off; the deprecated hooks keep firing unless a call or view said `false`.
+			return setting === false ? undefined : this._hooksLogger;
+		}
+		return typeof setting === "object" && setting.console === false ? this._quietLogger : this._logger;
+	}
+
+	/**
+	 * A view of this connection that uses `log` for every call that doesn't pass `log` itself. It
+	 * shares the token, loggers, API usage and pending log promises with this connection.
+	 */
+	withLog(log: boolean | RequestLogOptions | undefined): SalesforceConnection {
+		if (log === undefined) {
+			return this;
+		}
+		return this.fork({ _defaultLog: log, _fixedLogger: undefined });
+	}
+
+	/**
+	 * A view that logs every call to exactly `logger`, whatever the call's `log` says. Used for work
+	 * shared by several callers, which logs to each of them.
+	 *
+	 * @internal
+	 */
+	withLogger(logger: SalesforceLogger | undefined): SalesforceConnection {
+		return this.fork({ _fixedLogger: { logger } });
+	}
+
+	private fork(overrides: {
+		_defaultLog?: boolean | RequestLogOptions;
+		_fixedLogger?: { logger: SalesforceLogger | undefined };
+	}): SalesforceConnection {
+		return Object.assign(Object.create(SalesforceConnection.prototype) as SalesforceConnection, this, overrides);
+	}
+
+	/**
+	 * Waits for the promises your loggers (and hooks) returned, e.g. report attachments still being
+	 * written. Requests never wait for them; call this in `afterEach` or before the process exits.
+	 * Rejections are ignored. Resolves `false` if `timeoutMs` passed first, `true` otherwise.
+	 */
+	flushLogs(options?: FlushLogsOptions): Promise<boolean> {
+		return this._pendingLogs.flush(options);
+	}
+
+	/**
+	 * Returns the instance URL of the current token (authenticating if needed). With
+	 * `log: false`, a token request this triggers is not logged; with `log: { console: false }`
+	 * it skips the console loggers only.
+	 */
+	async instanceUrl(signal?: AbortSignal, options: { log?: boolean | RequestLogOptions } = {}): Promise<string> {
+		const logger = this.loggerFor(options.log);
+		const token = await this._auth.getToken({ transport: this._transport, signal, logger });
 		return new URL(token.instanceUrl).origin;
 	}
 
@@ -184,34 +304,57 @@ export class SalesforceConnection {
 	async send<T>(request: RestRequest): Promise<RestResponse<T>> {
 		const method = request.method ?? "GET";
 		const timeoutMs = request.timeoutMs ?? this._timeoutMs;
-		let token = await this.getToken(request.signal, timeoutMs);
+		const logger = this.loggerFor(request.log);
+		let token = await this.getToken(request.signal, timeoutMs, logger);
 		let reauthenticated = false;
 		let retries = 0;
 
 		for (let attempt = 1; ; attempt++) {
+			let prepared: Prepared | undefined;
 			let response: TransportResponse;
 			try {
-				response = await this.sendOnce(request, method, token, attempt, timeoutMs);
+				prepared = this.prepare(
+					request,
+					method,
+					token,
+					attempt,
+					combineSignals(request.signal, timeoutMs),
+					timeoutMs,
+					logger,
+				);
+				response = await this._transport.send(prepared.transportRequest);
 			} catch (error) {
-				if (this.canRetryFailure(method, request, retries)) {
+				const willRetry = this.canRetryFailure(method, request, retries);
+				if (prepared) {
+					logTransportError(logger, prepared.event, error, willRetry);
+				}
+				if (willRetry) {
 					retries++;
-					await sleep(this.retryDelay(undefined, retries), request.signal);
+					const delayMs = this.retryDelay(undefined, retries);
+					if (prepared) {
+						logRetry(logger, prepared.event, "network", undefined, delayMs);
+					}
+					await sleep(delayMs, request.signal);
 					continue;
 				}
 				throw error;
 			}
+			this.afterResponse(prepared.event, response, logger);
 
 			if (response.status === 401 && !reauthenticated && this._auth.invalidate) {
 				reauthenticated = true;
-				const next = await this.reauthenticate(token, request.signal, timeoutMs);
+				const next = await this.reauthenticate(token, prepared.event, request.signal, timeoutMs, logger);
 				if (next.accessToken !== token.accessToken) {
 					token = next;
 					continue;
 				}
 			}
-			if (this.shouldRetry(method, request, response, retries)) {
+			const retryReason = this.retryReason(method, request, response, retries);
+			if (retryReason) {
 				retries++;
-				await sleep(this.retryDelay(response, retries), request.signal);
+				const delayMs = this.retryDelay(response, retries);
+				logRetry(logger, prepared.event, retryReason, response.status, delayMs);
+				await sleep(delayMs, request.signal);
 				continue;
 			}
 			return this.toResult<T>(request, method, response);
@@ -219,13 +362,28 @@ export class SalesforceConnection {
 	}
 
 	/** Gets a token, bounded by the caller's signal and the request timeout. */
-	private getToken(signal: AbortSignal | undefined, timeoutMs: number): Promise<AccessToken> {
-		return this._auth.getToken({ transport: this._transport, signal: combineSignals(signal, timeoutMs) });
+	private getToken(
+		signal: AbortSignal | undefined,
+		timeoutMs: number,
+		logger: SalesforceLogger | undefined,
+	): Promise<AccessToken> {
+		return this._auth.getToken({ transport: this._transport, signal: combineSignals(signal, timeoutMs), logger });
 	}
 
-	private reauthenticate(token: AccessToken, signal: AbortSignal | undefined, timeoutMs: number): Promise<AccessToken> {
+	private reauthenticate(
+		token: AccessToken,
+		event: StartedEvent,
+		signal: AbortSignal | undefined,
+		timeoutMs: number,
+		logger: SalesforceLogger | undefined,
+	): Promise<AccessToken> {
+		emit(logger, "info", `${event.method} ${event.url} → 401: getting a new access token`, {
+			type: "auth.reauthenticate",
+			method: event.method,
+			url: event.url,
+		});
 		this._auth.invalidate?.(token);
-		return this.getToken(signal, timeoutMs);
+		return this.getToken(signal, timeoutMs, logger);
 	}
 
 	/** Resolves a request path against the instance URL, enforcing the origin allowlist. */
@@ -248,20 +406,6 @@ export class SalesforceConnection {
 		return url;
 	}
 
-	private async sendOnce(
-		request: RestRequest,
-		method: HttpMethod,
-		token: AccessToken,
-		attempt: number,
-		timeoutMs: number,
-	): Promise<TransportResponse> {
-		const signal = combineSignals(request.signal, timeoutMs);
-		const prepared = this.prepare(request, method, token, attempt, signal, timeoutMs);
-		const response = await this._transport.send(prepared.transportRequest);
-		this.afterResponse(prepared.event, response);
-		return response;
-	}
-
 	private prepare(
 		request: RestRequest,
 		method: HttpMethod,
@@ -269,14 +413,15 @@ export class SalesforceConnection {
 		attempt: number,
 		signal: AbortSignal | undefined,
 		timeoutMs: number,
-	): { transportRequest: Parameters<HttpTransport["send"]>[0]; event: StartedEvent } {
+		logger: SalesforceLogger | undefined,
+	): Prepared {
 		const url = this.resolveUrl(request.path, token.instanceUrl, request.query);
 		const { headers, body } = encodeRequest(request, this._headers);
 		headers.set("Authorization", `Bearer ${token.accessToken}`);
 
 		signal?.throwIfAborted();
 		const event: RequestEvent = { method, url: url.toString(), headers: redactHeaders(headers), body, attempt };
-		callHook(() => this._hooks.onRequest?.(event));
+		emit(logger, "debug", `${method} ${event.url}`, { type: "http.request", ...event });
 		return {
 			transportRequest: { method, url, headers, body, signal, timeoutMs: timeoutMs > 0 ? timeoutMs : undefined },
 			event: { ...event, started: Date.now() },
@@ -284,17 +429,29 @@ export class SalesforceConnection {
 	}
 
 	/** `body` is left out for a streamed response that hasn't been read yet. */
-	private afterResponse(event: StartedEvent, response: { status: number; headers: Headers; body?: Uint8Array }): void {
+	private afterResponse(
+		event: StartedEvent,
+		response: { status: number; headers: Headers; body?: Uint8Array },
+		logger: SalesforceLogger | undefined,
+	): void {
 		this.trackApiUsage(response.headers);
+		if (!logger) {
+			return;
+		}
 		const { started, ...requestEvent } = event;
-		callHook(() =>
-			this._hooks.onResponse?.({
+		const durationMs = Date.now() - started;
+		emit(
+			logger,
+			response.status >= 400 ? "warn" : "debug",
+			`${event.method} ${event.url} → ${response.status} (${durationMs} ms)`,
+			{
+				type: "http.response",
 				...requestEvent,
 				status: response.status,
-				durationMs: Date.now() - started,
+				durationMs,
 				responseHeaders: headersToObject(response.headers),
 				responseBody: response.body && eventBody(response.body, response.headers),
-			}),
+			},
 		);
 	}
 
@@ -328,28 +485,32 @@ export class SalesforceConnection {
 		}
 		const method = request.method ?? "GET";
 		const timeoutMs = request.timeoutMs ?? this._timeoutMs;
-		let token = await this.getToken(request.signal, timeoutMs);
+		const logger = this.loggerFor(request.log);
+		let token = await this.getToken(request.signal, timeoutMs, logger);
 		let reauthenticated = false;
 		let retries = 0;
 		for (let attempt = 1; ; attempt++) {
-			const { event, response } = await this.openStream(stream, request, method, token, attempt, timeoutMs);
+			const { event, response } = await this.openStream(stream, request, method, token, attempt, timeoutMs, logger);
 			if (response.status >= 200 && response.status < 300) {
-				this.afterResponse(event, { status: response.status, headers: response.headers });
+				this.afterResponse(event, { status: response.status, headers: response.headers }, logger);
 				return response;
 			}
 			const buffered = { status: response.status, headers: response.headers, body: await collect(response.body) };
-			this.afterResponse(event, buffered);
+			this.afterResponse(event, buffered, logger);
 			if (response.status === 401 && !reauthenticated && this._auth.invalidate) {
 				reauthenticated = true;
-				const next = await this.reauthenticate(token, request.signal, timeoutMs);
+				const next = await this.reauthenticate(token, event, request.signal, timeoutMs, logger);
 				if (next.accessToken !== token.accessToken) {
 					token = next;
 					continue;
 				}
 			}
-			if (this.shouldRetry(method, request, buffered, retries)) {
+			const retryReason = this.retryReason(method, request, buffered, retries);
+			if (retryReason) {
 				retries++;
-				await sleep(this.retryDelay(buffered, retries), request.signal);
+				const delayMs = this.retryDelay(buffered, retries);
+				logRetry(logger, event, retryReason, buffered.status, delayMs);
+				await sleep(delayMs, request.signal);
 				continue;
 			}
 			throw this.errorFor(request, method, buffered);
@@ -367,6 +528,7 @@ export class SalesforceConnection {
 		token: AccessToken,
 		attempt: number,
 		timeoutMs: number,
+		logger: SalesforceLogger | undefined,
 	): Promise<{ event: StartedEvent; response: StreamingTransportResponse }> {
 		const headerTimeout = new AbortController();
 		const timer =
@@ -377,23 +539,37 @@ export class SalesforceConnection {
 					)
 				: undefined;
 		const signal = request.signal ? AbortSignal.any([request.signal, headerTimeout.signal]) : headerTimeout.signal;
+		let prepared: Prepared | undefined;
 		try {
-			const prepared = this.prepare(request, method, token, attempt, signal, 0);
+			prepared = this.prepare(request, method, token, attempt, signal, 0, logger);
 			return { event: prepared.event, response: await stream(prepared.transportRequest) };
+		} catch (error) {
+			if (prepared) {
+				logTransportError(logger, prepared.event, error, false);
+			}
+			throw error;
 		} finally {
 			clearTimeout(timer);
 		}
 	}
 
-	private shouldRetry(method: HttpMethod, request: RestRequest, response: TransportResponse, retries: number): boolean {
+	/** Why the response should be retried, or `undefined` when it shouldn't be. */
+	private retryReason(
+		method: HttpMethod,
+		request: RestRequest,
+		response: TransportResponse,
+		retries: number,
+	): "status" | "errorCode" | undefined {
 		const retry = this._retry;
 		if (!retry || retries >= retry.retries || request.retry === false) {
-			return false;
+			return undefined;
 		}
 		if (retry.statusCodes.includes(response.status) && (request.retry === true || retry.methods.includes(method))) {
-			return true;
+			return "status";
 		}
-		return retry.errorCodes.length > 0 && response.status >= 400 && hasErrorCodeIn(response, retry.errorCodes);
+		return retry.errorCodes.length > 0 && response.status >= 400 && hasErrorCodeIn(response, retry.errorCodes)
+			? "errorCode"
+			: undefined;
 	}
 
 	/**
@@ -418,9 +594,45 @@ export class SalesforceConnection {
 	private trackApiUsage(headers: Headers): void {
 		const match = /(?:^|[\s,;])api-usage=(\d+)\/(\d+)/.exec(headers.get("sforce-limit-info") ?? "");
 		if (match) {
-			this._apiUsage = { used: Number(match[1]), max: Number(match[2]) };
+			this._shared.apiUsage = { used: Number(match[1]), max: Number(match[2]) };
 		}
 	}
+}
+
+function logTransportError(
+	logger: SalesforceLogger | undefined,
+	event: StartedEvent,
+	error: unknown,
+	willRetry: boolean,
+): void {
+	emit(logger, willRetry ? "warn" : "error", `${event.method} ${event.url} failed: ${errorText(error)}`, {
+		type: "http.error",
+		method: event.method,
+		url: event.url,
+		attempt: event.attempt,
+		durationMs: Date.now() - event.started,
+		error,
+		willRetry,
+	});
+}
+
+function logRetry(
+	logger: SalesforceLogger | undefined,
+	event: StartedEvent,
+	reason: "status" | "errorCode" | "network",
+	status: number | undefined,
+	delayMs: number,
+): void {
+	const cause = reason === "network" ? "network error" : reason === "status" ? `status ${status}` : "error code";
+	emit(logger, "warn", `Retrying ${event.method} ${event.url} in ${delayMs} ms (${cause}, attempt ${event.attempt})`, {
+		type: "http.retry",
+		method: event.method,
+		url: event.url,
+		attempt: event.attempt,
+		reason,
+		status,
+		delayMs,
+	});
 }
 
 function hasErrorCodeIn(response: TransportResponse, codes: readonly string[]): boolean {
@@ -536,21 +748,6 @@ function assertSerializable(body: unknown): void {
 		throw new TypeError(
 			"Unsupported request body: Blob, FormData and streams can't be sent. Pass a Uint8Array (see buildMultipart for multipart).",
 		);
-	}
-}
-
-/**
- * Runs an observability hook; a throwing hook must never change the outcome of a request. A
- * returned promise is not awaited, and its rejection is swallowed so it can't go unhandled.
- */
-function callHook(hook: () => void | Promise<void>): void {
-	try {
-		const result = hook();
-		if (result && typeof result.catch === "function") {
-			result.catch(() => undefined);
-		}
-	} catch {
-		// Ignored on purpose: the request already happened.
 	}
 }
 

@@ -1,3 +1,4 @@
+import { emit, errorText, SharedLog } from "../logging";
 import { share, type SharedRequest } from "../shared";
 
 import type { AccessToken, AuthContext, AuthProvider } from "./types";
@@ -10,34 +11,74 @@ const EXPIRY_MARGIN_MS = 60_000;
  * concurrent callers. A caller that aborts only stops waiting; the token request itself is
  * cancelled once every waiting caller has aborted. `invalidate` drops the cached token so the
  * next call fetches a new one.
+ *
+ * Token events (`auth.tokenIssued`, `auth.tokenCached`, `auth.error`) go to `context.logger`,
+ * labeled with `name`. A request shared by concurrent callers is logged to each caller's logger,
+ * also to callers that joined after it started (once per logger).
  */
 export class CachingAuthProvider implements AuthProvider {
-	private _pending: SharedRequest<AccessToken> | undefined;
+	private _pending: { request: SharedRequest<AccessToken>; log: SharedLog } | undefined;
 	private _token: { value: AccessToken; fetchedAt: number } | undefined;
 
-	constructor(private readonly _fetchToken: (context: AuthContext) => Promise<AccessToken>) {}
+	constructor(
+		private readonly _fetchToken: (context: AuthContext) => Promise<AccessToken>,
+		private readonly _name: string = "tokenProvider",
+	) {}
 
 	getToken(context: AuthContext): Promise<AccessToken> {
 		if (this._token && !isExpired(this._token.value, this._token.fetchedAt)) {
-			return Promise.resolve(this._token.value);
+			const token = this._token.value;
+			emit(context.logger, "debug", `Using the cached access token from ${this._name}`, {
+				type: "auth.tokenCached",
+				provider: this._name,
+				instanceUrl: token.instanceUrl,
+				expiresAt: token.expiresAt,
+			});
+			return Promise.resolve(token);
 		}
-		if (!this._pending || this._pending.abandoned) {
-			const pending = share((signal) =>
-				this._fetchToken({ transport: context.transport, signal }).then((token) => {
-					this._token = { value: token, fetchedAt: Date.now() };
-					return token;
-				}),
+		if (!this._pending || this._pending.request.abandoned) {
+			const logger = new SharedLog();
+			const started = Date.now();
+			const request = share((signal) =>
+				this._fetchToken({ transport: context.transport, signal, logger }).then(
+					(token) => {
+						this._token = { value: token, fetchedAt: Date.now() };
+						const durationMs = Date.now() - started;
+						emit(logger, "info", `${this._name} issued an access token for ${token.instanceUrl} (${durationMs} ms)`, {
+							type: "auth.tokenIssued",
+							provider: this._name,
+							instanceUrl: token.instanceUrl,
+							expiresAt: token.expiresAt,
+							durationMs,
+						});
+						return token;
+					},
+					(error: unknown) => {
+						if (!signal.aborted) {
+							emit(logger, "error", `${this._name} could not get an access token: ${errorText(error)}`, {
+								type: "auth.error",
+								provider: this._name,
+								error,
+								durationMs: Date.now() - started,
+							});
+						}
+						throw error;
+					},
+				),
 			);
+			const pending = { request, log: logger };
 			this._pending = pending;
-			pending.promise
+			request.promise
 				.finally(() => {
+					logger.close();
 					if (this._pending === pending) {
 						this._pending = undefined;
 					}
 				})
 				.catch(() => undefined);
 		}
-		return this._pending.join(context.signal);
+		this._pending.log.join(context.logger);
+		return this._pending.request.join(context.signal);
 	}
 
 	invalidate(token: AccessToken): void {

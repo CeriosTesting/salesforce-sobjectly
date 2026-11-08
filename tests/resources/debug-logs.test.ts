@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { SalesforceError } from "../../src/errors";
+import { createLogger } from "../../src/logging";
 import { DebugLogCaptureError } from "../../src/resources/debug-logs";
 import { ApexExecutionError } from "../../src/resources/tooling";
 import { API, createClient, type FakeResponse, FakeTransport, type RecordedRequest } from "../helpers/fake-transport";
@@ -95,6 +96,41 @@ function fakeOrg(state: OrgState): FakeTransport {
 }
 
 describe("debugLogs.capture", () => {
+	it("log: false keeps the capture's own calls and events out of the log, but not the work", async () => {
+		const types: string[] = [];
+		const urls: string[] = [];
+		const sf = createClient(fakeOrg({ logs: [] }), {
+			log: true,
+			logger: createLogger((_level, _message, event) => {
+				types.push(event.type);
+				if (event.type === "http.request") {
+					urls.push(event.url);
+				}
+			}),
+		});
+		await sf.tooling.debugLogs.capture(() => sf.tooling.executeAnonymous("System.debug(1);"), {
+			settleMs: 0,
+			log: false,
+		});
+		expect(types).toEqual(["http.request", "http.response"]);
+		expect(urls).toEqual([expect.stringContaining("/tooling/executeAnonymous")]);
+	});
+
+	it("captures through a withLog view share the per-user queue with the client", async () => {
+		const sf = createClient(fakeOrg({ logs: [] }));
+		const order: string[] = [];
+		const work = (name: string) => async (): Promise<void> => {
+			order.push(`${name} start`);
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			order.push(`${name} end`);
+		};
+		await Promise.all([
+			sf.tooling.debugLogs.capture(work("a"), { settleMs: 0, userId: "005U" }),
+			sf.withLog(true).tooling.debugLogs.capture(work("b"), { settleMs: 0, userId: "005U" }),
+		]);
+		expect(order).toEqual(["a start", "a end", "b start", "b end"]);
+	});
+
 	it("creates a debug level and trace flag, collects new logs and removes the flag", async () => {
 		const state: OrgState = {
 			logs: [{ Id: "07LOLD", Operation: "old", Status: "Success", StartTime: "2025-01-01T00:00:00Z" }],

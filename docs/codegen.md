@@ -211,6 +211,7 @@ npx sobjectly generate                          # finds sobjectly.config.* in th
 npx sobjectly generate --config tools/sf.config.ts --env-file .env.ci
 npx sobjectly generate --check                  # CI: fail when the generated file is out of date
 npx sobjectly generate --stdout > preview.ts    # print instead of writing
+npx sobjectly generate --verbose                # also print every request and token call (to stderr)
 ```
 
 ### `--check` in CI
@@ -242,7 +243,7 @@ The file is written atomically (to a temp file, then renamed), and the output is
 ```ts
 import { checkGenerated, generate, generateSource } from "@cerios/salesforce-sobjectly/codegen";
 
-await generate(config, { cwd: process.cwd(), logger: console });
+await generate(config, { cwd: process.cwd(), logger: console }); // progress and warnings; log: true adds every request (logging.md)
 const { source } = await generate(config, { write: false }); // don't write, just return the source
 const check = await checkGenerated(config); // { upToDate, reason, added, removed, changed }
 const source = generateSource(describes, { picklists: "string" }); // pure: describes in, source out

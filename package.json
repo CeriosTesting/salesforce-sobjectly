@@ -86,7 +86,7 @@
 		"test:integration": "vitest --run --config vitest.integration.config.mts",
 		"test:smoke": "node scripts/smoke.mjs",
 		"test:watch": "vitest --watch",
-		"version-packages": "changeset version",
+		"version-packages": "changeset version && npm install --package-lock-only --ignore-scripts",
 		"version-packages:prepare-release": "npm run version-packages && npm run format"
 	},
 	"dependencies": {
@@ -95,17 +95,17 @@
 	"devDependencies": {
 		"@arethetypeswrong/cli": "^0.18.5",
 		"@changesets/cli": "^3.0.3",
-		"@types/node": "^26.6.3",
-		"@vitest/coverage-v8": "5.0.3",
+		"@types/node": "^26.6.6",
+		"@vitest/coverage-v8": "5.1.0",
 		"husky": "^9.1.7",
 		"lint-staged": "^17.6.0",
-		"npm-check-updates": "^23.1.0",
-		"oxfmt": "^0.71.0",
-		"oxlint": "^1.86.0",
-		"oxlint-tsgolint": "^7.0.2003",
-		"tsdown": "^0.23.0",
+		"npm-check-updates": "^23.1.1",
+		"oxfmt": "^0.77.0",
+		"oxlint": "^1.92.0",
+		"oxlint-tsgolint": "^7.0.2006",
+		"tsdown": "^0.23.7",
 		"typescript": "^7.0.2",
-		"vitest": "^5.0.3"
+		"vitest": "^5.1.0"
 	},
 	"engines": {
 		"node": ">=20.19.0"

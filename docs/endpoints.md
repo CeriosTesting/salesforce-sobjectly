@@ -1,6 +1,6 @@
 # Endpoint coverage
 
-The client has typed helpers for the resources below. Everything else under `/services/data/vXX.X/` (and `/services/apexrest/`) is reachable with `sf.request<T>()`, which handles auth, errors, retries and hooks in the same way.
+The client has typed helpers for the resources below. Everything else under `/services/data/vXX.X/` (and `/services/apexrest/`) is reachable with `sf.request<T>()`, which handles auth, errors, retries and logging in the same way.
 
 ## Typed helpers
 

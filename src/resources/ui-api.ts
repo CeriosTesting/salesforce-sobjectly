@@ -1,5 +1,6 @@
 import type { MetadataCache } from "../cache";
 import { type SalesforceConnection, segment } from "../http/connection";
+import type { SalesforceLogger } from "../logging";
 import type { SObjectFieldName, SObjectName, SObjectRecord } from "../registry";
 import type { ObjectInfo, PicklistValues, UiFieldValue, UiLayout, UiRecord } from "../types/platform";
 
@@ -35,11 +36,11 @@ export class UiApi<R extends object> {
 
 	/** `GET /ui-api/object-info/{name}`: fields, record types and defaults as the UI sees them. Cached. */
 	objectInfo<K extends SObjectName<R>>(sobject: K, options: { signal?: AbortSignal } = {}): Promise<ObjectInfo> {
-		const load = (signal: AbortSignal | undefined): Promise<ObjectInfo> =>
-			this._connection.request({ path: `/ui-api/object-info/${segment(sobject)}`, signal });
+		const load = (signal: AbortSignal | undefined, logger: SalesforceLogger | undefined): Promise<ObjectInfo> =>
+			this._connection.withLogger(logger).request({ path: `/ui-api/object-info/${segment(sobject)}`, signal });
 		return this._cache
 			? this._cache.getOrLoad(`ui-object-info:${sobject}`, load, options.signal)
-			: load(options.signal);
+			: load(options.signal, this._connection.logger);
 	}
 
 	/** Picklist values of every picklist field for a record type. */

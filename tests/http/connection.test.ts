@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/no-deprecated -- these tests cover the deprecated hooks */
 import { describe, expect, it, vi } from "vitest";
 
 import { accessToken, tokenProvider } from "../../src/auth/providers";

@@ -1,4 +1,5 @@
 import { type SalesforceConnection, segment, sleep } from "../http/connection";
+import { emit, type RequestLogOptions } from "../logging";
 import type {
 	ReportDataCell,
 	ReportDescribe,
@@ -17,6 +18,11 @@ export interface RunReportOptions {
 	/** Boolean filter logic for `filters`, e.g. `"1 AND (2 OR 3)"`. */
 	booleanFilter?: string;
 	signal?: AbortSignal;
+	/**
+	 * Log the run (`true`), keep it out of the log (`false`) or off the console only
+	 * (`{ console: false }`). Defaults to the client's (or `withLog` view's) setting.
+	 */
+	log?: boolean | RequestLogOptions;
 }
 
 export interface WaitForReportOptions {
@@ -25,6 +31,11 @@ export interface WaitForReportOptions {
 	/** Give up after this many milliseconds. Defaults to 5 minutes. */
 	timeoutMs?: number;
 	signal?: AbortSignal;
+	/**
+	 * Log the status checks and `report.status` events (`true`), keep it out of the log (`false`) or off the console only
+	 * (`{ console: false }`). Defaults to the client's (or `withLog` view's) setting.
+	 */
+	log?: boolean | RequestLogOptions;
 }
 
 /** A detail row: detail column API name -> `{ label, value }`. */
@@ -55,6 +66,7 @@ export class ReportsApi {
 			query: { includeDetails: options.includeDetails ?? true },
 			body: reportMetadata ? { reportMetadata } : undefined,
 			signal: options.signal,
+			log: options.log,
 			timeoutMs: 0,
 		});
 	}
@@ -68,6 +80,7 @@ export class ReportsApi {
 			query: { includeDetails: options.includeDetails ?? true },
 			body: reportMetadata ? { reportMetadata } : {},
 			signal: options.signal,
+			log: options.log,
 		});
 	}
 
@@ -75,11 +88,12 @@ export class ReportsApi {
 	instance(
 		reportId: string,
 		instanceId: string,
-		options: { signal?: AbortSignal } = {},
+		options: { signal?: AbortSignal; log?: boolean | RequestLogOptions } = {},
 	): Promise<ReportResult & { attributes: { status?: ReportInstance["status"] } }> {
 		return this._connection.request({
 			path: `${reportPath(reportId)}/instances/${segment(instanceId)}`,
 			signal: options.signal,
+			log: options.log,
 		});
 	}
 
@@ -91,9 +105,17 @@ export class ReportsApi {
 	): Promise<ReportResult> {
 		const interval = options.pollIntervalMs ?? 2_000;
 		const deadline = Date.now() + (options.timeoutMs ?? 5 * 60_000);
+		const logger = this._connection.loggerFor(options.log);
 		for (;;) {
-			const result = await this.instance(reportId, instanceId, { signal: options.signal });
+			const result = await this.instance(reportId, instanceId, { signal: options.signal, log: options.log });
 			const status = result.attributes.status;
+			const finished = status === "Success" || status === "Error";
+			emit(
+				logger,
+				finished ? "info" : "debug",
+				`Report run ${instanceId} of report ${reportId} is ${status ?? "pending"}`,
+				{ type: "report.status", reportId, instanceId, status },
+			);
 			if (status === "Success") {
 				return result;
 			}

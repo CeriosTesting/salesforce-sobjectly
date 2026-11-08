@@ -264,6 +264,6 @@ describe("MetadataCache", () => {
 		await cache.getOrLoad("k", load, controller.signal);
 		await cache.getOrLoad("k", load, controller.signal);
 		expect(load).toHaveBeenCalledTimes(2);
-		expect(load).toHaveBeenCalledWith(controller.signal);
+		expect(load).toHaveBeenCalledWith(controller.signal, undefined);
 	});
 });

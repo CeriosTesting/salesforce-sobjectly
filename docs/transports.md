@@ -30,8 +30,8 @@ new SalesforceClient({ apiVersion: "v66.0", auth, transport: fetchTransport({ fe
 The package does not bundle axios, because Node's built-in `fetch` does the same job. If you already use axios (for its interceptors, proxy agents or mocking), it takes about 15 lines:
 
 ```ts
-import axios from "axios";
 import type { HttpTransport } from "@cerios/salesforce-sobjectly";
+import axios from "axios";
 
 export function axiosTransport(instance = axios.create()): HttpTransport {
 	return {
@@ -62,8 +62,8 @@ Other clients (undici, got, ky) follow the same pattern.
 In Playwright tests you can send requests through Playwright's [`APIRequestContext`](https://playwright.dev/docs/api/class-apirequestcontext). They then show up in the trace viewer, and the context's proxy and `ignoreHTTPSErrors` settings apply. The package does not depend on Playwright, so copy this adapter:
 
 ```ts
-import type { APIRequestContext } from "@playwright/test";
 import type { HttpTransport } from "@cerios/salesforce-sobjectly";
+import type { APIRequestContext } from "@playwright/test";
 
 export function playwrightTransport(context: APIRequestContext): HttpTransport {
 	return {
@@ -91,8 +91,9 @@ export function playwrightTransport(context: APIRequestContext): HttpTransport {
 Use it with the `request` fixture, or with a context from `request.newContext()`:
 
 ```ts
-import { test, expect } from "@playwright/test";
 import { SalesforceClient } from "@cerios/salesforce-sobjectly";
+import { test, expect } from "@playwright/test";
+
 import { API_VERSION, type SObjectRegistry } from "./generated/sobjects";
 
 test("creates an account", async ({ request }) => {
@@ -122,7 +123,7 @@ The adapter has no `stream()`, so Bulk API results are read page by page.
 > };
 > ```
 
-## Timeouts, retries and hooks
+## Timeouts, retries and logging
 
 ```ts
 new SalesforceClient({
@@ -131,10 +132,8 @@ new SalesforceClient({
 	timeoutMs: 60_000, // per request; 0 disables it (default 120 000)
 	retry: { retries: 3, statusCodes: [429, 502, 503, 504], errorCodes: ["UNABLE_TO_LOCK_ROW"] }, // opt-in
 	headers: { "Sforce-Call-Options": "client=my-test-suite" },
-	hooks: {
-		onRequest: (event) => console.log(event.method, event.url), // Authorization is redacted
-		onResponse: (event) => console.log(event.status, `${event.durationMs}ms`),
-	},
+	logger: console, // requests, responses, token calls (redacted), retries; see logging.md
+	log: true, // logging is off by default
 });
 ```
 
@@ -148,72 +147,6 @@ new SalesforceClient({
 
 ### Logging requests and responses
 
-Hooks receive the bodies, so a hook can serve as a request logger. `onRequest` gets the request `body` as sent: JSON or form text, or bytes for binary uploads. `onResponse` gets that same request data plus the `responseBody`: text for JSON, XML, CSV and `text/*`, bytes otherwise. One `onResponse` call therefore has everything for a log entry:
+Pass a `logger` and `log: true` to see every request and response with bodies, token requests (redacted), retries and failures. `logger: console` works as-is. Logging is off by default, so a logger alone logs nothing. See [Logging](logging.md) for the events, filtering, turning logging on for some calls (`log`, `sf.withLog()`), and Allure and Playwright report examples.
 
-```ts
-new SalesforceClient({
-	auth,
-	apiVersion: "v66.0",
-	hooks: {
-		onResponse: (event) => {
-			console.log(`${event.method} ${event.url} → ${event.status} in ${event.durationMs} ms`);
-			if (typeof event.responseBody === "string") console.log(event.responseBody.slice(0, 500));
-		},
-	},
-});
-```
-
-A hook may return a promise, so async reporters fit directly. The promise is not awaited, and a rejection is ignored. For an Allure report (`allure-js-commons`), attach every call as JSON:
-
-```ts
-import * as allure from "allure-js-commons";
-import type { RequestHooks, ResponseEvent } from "@cerios/salesforce-sobjectly";
-
-function readable(body: string | Uint8Array | undefined): unknown {
-	if (typeof body !== "string") return body && `<${body.byteLength} bytes>`;
-	try {
-		return JSON.parse(body) as unknown;
-	} catch {
-		return body; // CSV, XML or plain text
-	}
-}
-
-function describeCall(event: ResponseEvent): { name: string; json: string } {
-	return {
-		name: `${event.method} ${new URL(event.url).pathname} → ${event.status}`,
-		json: JSON.stringify(
-			{
-				request: { method: event.method, url: event.url, attempt: event.attempt, body: readable(event.body) },
-				response: { status: event.status, durationMs: event.durationMs, body: readable(event.responseBody) },
-			},
-			null,
-			2,
-		),
-	};
-}
-
-export const allureHooks: RequestHooks = {
-	onResponse: (event) => {
-		const { name, json } = describeCall(event);
-		return allure.attachment(name, json, "application/json");
-	},
-};
-```
-
-In Playwright tests without Allure, attach it to the test instead:
-
-```ts
-import { test } from "@playwright/test";
-
-const playwrightHooks: RequestHooks = {
-	onResponse: (event) => {
-		const { name, json } = describeCall(event);
-		return test.info().attach(name, { body: json, contentType: "application/json" });
-	},
-};
-```
-
-- The `Authorization` header is redacted, and token requests (client credentials, JWT bearer, refresh token) never reach the hooks, so secrets can't end up in a report. `sfCli()` makes no HTTP calls at all.
-- Hooks fire once per attempt, so a retried request is logged once per try. `event.attempt` tells them apart.
-- Successful streamed responses (Bulk API query results over `fetchTransport`) have no `responseBody`, because the body hasn't been read yet when the hook fires. Error responses are buffered and do have one.
-- Bodies contain your record data. Treat reports and logs that include them accordingly.
+The older `hooks` option (`onRequest`/`onResponse`) still works but is deprecated. Hooks fire without `log: true`, as before; an explicit `log: false` skips them. Its events are the logger's `http.request` and `http.response` events without `type`. [Logging](logging.md#migrating-from-hooks) shows how to move over.

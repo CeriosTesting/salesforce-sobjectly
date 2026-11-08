@@ -1,5 +1,7 @@
 import { createSign } from "node:crypto";
 
+import { emit } from "../logging";
+
 import { CachingAuthProvider } from "./caching-provider";
 import { requestOAuthToken } from "./oauth";
 import type { AccessToken, AuthContext, AuthProvider } from "./types";
@@ -19,7 +21,7 @@ export function accessToken(token: AccessToken): AuthProvider {
  * `fetchToken` is called again.
  */
 export function tokenProvider(fetchToken: (context: AuthContext) => Promise<AccessToken>): AuthProvider {
-	return new CachingAuthProvider(fetchToken);
+	return new CachingAuthProvider(fetchToken, "tokenProvider");
 }
 
 export interface ClientCredentialsOptions {
@@ -46,9 +48,15 @@ export function clientCredentials(options: ClientCredentialsOptions): AuthProvid
 		if (options.scope) {
 			params.scope = options.scope;
 		}
-		const { token } = await requestOAuthToken(context.transport, options.loginUrl, params, context.signal);
+		const { token } = await requestOAuthToken(
+			context.transport,
+			options.loginUrl,
+			params,
+			context.signal,
+			context.logger,
+		);
 		return token;
-	});
+	}, "clientCredentials");
 }
 
 export interface JwtBearerOptions {
@@ -79,9 +87,10 @@ export function jwtBearer(options: JwtBearerOptions): AuthProvider {
 			options.loginUrl,
 			{ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion },
 			context.signal,
+			context.logger,
 		);
 		return token;
-	});
+	}, "jwtBearer");
 }
 
 export interface RefreshTokenOptions {
@@ -107,9 +116,19 @@ export function refreshToken(options: RefreshTokenOptions): AuthProvider {
 		if (options.clientSecret) {
 			params.client_secret = options.clientSecret;
 		}
-		const { token, response } = await requestOAuthToken(context.transport, options.loginUrl, params, context.signal);
+		const { token, response } = await requestOAuthToken(
+			context.transport,
+			options.loginUrl,
+			params,
+			context.signal,
+			context.logger,
+		);
 		if (response.refresh_token && response.refresh_token !== currentRefreshToken) {
 			currentRefreshToken = response.refresh_token;
+			emit(context.logger, "info", "Salesforce rotated the refresh token", {
+				type: "auth.refreshTokenRotated",
+				provider: "refreshToken",
+			});
 			try {
 				options.onRefreshTokenRotated?.(response.refresh_token);
 			} catch {
@@ -117,7 +136,7 @@ export function refreshToken(options: RefreshTokenOptions): AuthProvider {
 			}
 		}
 		return token;
-	});
+	}, "refreshToken");
 }
 
 /** Builds a signed RS256 JWT assertion for the JWT bearer flow. Exported for testing. */
