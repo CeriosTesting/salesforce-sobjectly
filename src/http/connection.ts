@@ -141,6 +141,12 @@ export interface ConnectionOptions {
 	headers?: Record<string, string>;
 	/** Receives requests, responses, token requests (redacted), retries and failures. One logger or several. */
 	logger?: SalesforceLoggerOption;
+	/**
+	 * Whether calls are logged when they don't say so themselves. Defaults to `false`: nothing is
+	 * logged until a call, a `withLog` view or this option turns it on. `{ console: false }` logs to
+	 * the custom loggers only. Hooks keep firing unless this (or a call) is explicitly `false`.
+	 */
+	log?: boolean | RequestLogOptions;
 	/** @deprecated Use `logger`. */
 	// oxlint-disable-next-line typescript/no-deprecated -- hooks stay supported, through the logger
 	hooks?: RequestHooks;
@@ -171,11 +177,19 @@ export class SalesforceConnection {
 	private readonly _retry: ResolvedRetry | undefined;
 	private readonly _allowedOrigins: Set<string>;
 	private readonly _headers: Record<string, string>;
+	/** Every logger and the hooks. */
 	private readonly _logger: SalesforceLogger | undefined;
-	/** Every logger except the console ones, for requests sent with `log: { console: false }`. */
+	/** Every logger except the console ones, and the hooks, for `log: { console: false }`. */
 	private readonly _quietLogger: SalesforceLogger | undefined;
+	/** The hooks alone: they fire while logging is off by default, but not with an explicit `log: false`. */
+	private readonly _hooksLogger: SalesforceLogger | undefined;
 	private readonly _pendingLogs = new PendingLogs();
-	private _apiUsage: ApiUsage | undefined;
+	/** State every `withLog` view of this connection shares. */
+	private readonly _shared: { apiUsage?: ApiUsage } = {};
+	/** The log setting for calls that don't pass `log`; `undefined` means off, but hooks still fire. */
+	private _defaultLog: boolean | RequestLogOptions | undefined;
+	/** Set on `withLogger` forks: every call logs to exactly this logger. */
+	private _fixedLogger: { logger: SalesforceLogger | undefined } | undefined;
 
 	constructor(options: ConnectionOptions) {
 		assertApiVersion(
@@ -191,25 +205,73 @@ export class SalesforceConnection {
 		this._allowedOrigins = new Set((options.allowedOrigins ?? []).map((origin) => new URL(origin).origin));
 		this._headers = options.headers ?? {};
 		// oxlint-disable-next-line typescript/no-deprecated -- hooks stay supported, through the logger
-		const loggers = [...toLoggers(options.logger), hooksLogger(options.hooks)]
-			.filter((logger): logger is SalesforceLogger => logger !== undefined)
-			.map((logger) => this._pendingLogs.track(logger));
-		this._logger = combineLoggers(...loggers);
-		this._quietLogger = combineLoggers(...loggers.filter((logger) => !isConsoleLogger(logger)));
+		const hooks = hooksLogger(options.hooks);
+		this._hooksLogger = hooks && this._pendingLogs.track(hooks);
+		const loggers = toLoggers(options.logger).map((logger) => this._pendingLogs.track(logger));
+		this._logger = combineLoggers(...loggers, this._hooksLogger);
+		this._quietLogger = combineLoggers(...loggers.filter((logger) => !isConsoleLogger(logger)), this._hooksLogger);
+		this._defaultLog = options.log;
 	}
 
 	/** API usage as reported by the last response's `Sforce-Limit-Info` header. */
 	get apiUsage(): ApiUsage | undefined {
-		return this._apiUsage;
+		return this._shared.apiUsage;
 	}
 
 	get transport(): HttpTransport {
 		return this._transport;
 	}
 
-	/** The client's logger (with the hooks adapted into it), for resources and extensions that log. */
+	/**
+	 * The logger for calls that don't pass `log`, honoring this connection's log setting (and its
+	 * `withLog` view). For resources and extensions that log events of their own.
+	 */
 	get logger(): SalesforceLogger | undefined {
-		return this._logger;
+		return this.loggerFor(undefined);
+	}
+
+	/**
+	 * The logger for a call with this `log` setting: a call's own `log` wins over the view's or
+	 * client's default. `undefined` when nothing should be logged.
+	 */
+	loggerFor(log: boolean | RequestLogOptions | undefined): SalesforceLogger | undefined {
+		if (this._fixedLogger) {
+			return this._fixedLogger.logger;
+		}
+		const setting = log ?? this._defaultLog;
+		if (setting === undefined || setting === false) {
+			// Logging is off; the deprecated hooks keep firing unless a call or view said `false`.
+			return setting === false ? undefined : this._hooksLogger;
+		}
+		return typeof setting === "object" && setting.console === false ? this._quietLogger : this._logger;
+	}
+
+	/**
+	 * A view of this connection that uses `log` for every call that doesn't pass `log` itself. It
+	 * shares the token, loggers, API usage and pending log promises with this connection.
+	 */
+	withLog(log: boolean | RequestLogOptions | undefined): SalesforceConnection {
+		if (log === undefined) {
+			return this;
+		}
+		return this.fork({ _defaultLog: log, _fixedLogger: undefined });
+	}
+
+	/**
+	 * A view that logs every call to exactly `logger`, whatever the call's `log` says. Used for work
+	 * shared by several callers, which logs to each of them.
+	 *
+	 * @internal
+	 */
+	withLogger(logger: SalesforceLogger | undefined): SalesforceConnection {
+		return this.fork({ _fixedLogger: { logger } });
+	}
+
+	private fork(overrides: {
+		_defaultLog?: boolean | RequestLogOptions;
+		_fixedLogger?: { logger: SalesforceLogger | undefined };
+	}): SalesforceConnection {
+		return Object.assign(Object.create(SalesforceConnection.prototype) as SalesforceConnection, this, overrides);
 	}
 
 	/**
@@ -227,7 +289,7 @@ export class SalesforceConnection {
 	 * it skips the console loggers only.
 	 */
 	async instanceUrl(signal?: AbortSignal, options: { log?: boolean | RequestLogOptions } = {}): Promise<string> {
-		const logger = this.loggerFor(options);
+		const logger = this.loggerFor(options.log);
 		const token = await this._auth.getToken({ transport: this._transport, signal, logger });
 		return new URL(token.instanceUrl).origin;
 	}
@@ -242,7 +304,7 @@ export class SalesforceConnection {
 	async send<T>(request: RestRequest): Promise<RestResponse<T>> {
 		const method = request.method ?? "GET";
 		const timeoutMs = request.timeoutMs ?? this._timeoutMs;
-		const logger = this.loggerFor(request);
+		const logger = this.loggerFor(request.log);
 		let token = await this.getToken(request.signal, timeoutMs, logger);
 		let reauthenticated = false;
 		let retries = 0;
@@ -297,15 +359,6 @@ export class SalesforceConnection {
 			}
 			return this.toResult<T>(request, method, response);
 		}
-	}
-
-	/** The logger for one request: none with `log: false`, no console loggers with `{ console: false }`. */
-	private loggerFor(request: { log?: boolean | RequestLogOptions }): SalesforceLogger | undefined {
-		const { log } = request;
-		if (log === false) {
-			return undefined;
-		}
-		return typeof log === "object" && log.console === false ? this._quietLogger : this._logger;
 	}
 
 	/** Gets a token, bounded by the caller's signal and the request timeout. */
@@ -432,7 +485,7 @@ export class SalesforceConnection {
 		}
 		const method = request.method ?? "GET";
 		const timeoutMs = request.timeoutMs ?? this._timeoutMs;
-		const logger = this.loggerFor(request);
+		const logger = this.loggerFor(request.log);
 		let token = await this.getToken(request.signal, timeoutMs, logger);
 		let reauthenticated = false;
 		let retries = 0;
@@ -541,7 +594,7 @@ export class SalesforceConnection {
 	private trackApiUsage(headers: Headers): void {
 		const match = /(?:^|[\s,;])api-usage=(\d+)\/(\d+)/.exec(headers.get("sforce-limit-info") ?? "");
 		if (match) {
-			this._apiUsage = { used: Number(match[1]), max: Number(match[2]) };
+			this._shared.apiUsage = { used: Number(match[1]), max: Number(match[2]) };
 		}
 	}
 }

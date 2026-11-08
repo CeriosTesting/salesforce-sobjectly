@@ -133,6 +133,7 @@ new SalesforceClient({
 	retry: { retries: 3, statusCodes: [429, 502, 503, 504], errorCodes: ["UNABLE_TO_LOCK_ROW"] }, // opt-in
 	headers: { "Sforce-Call-Options": "client=my-test-suite" },
 	logger: console, // requests, responses, token calls (redacted), retries; see logging.md
+	log: true, // logging is off by default
 });
 ```
 
@@ -146,6 +147,6 @@ new SalesforceClient({
 
 ### Logging requests and responses
 
-Pass a `logger` to see every request and response with bodies, token requests (redacted), retries and failures. `logger: console` works as-is. See [Logging](logging.md) for the events, filtering, `log: false`, and Allure and Playwright report examples.
+Pass a `logger` and `log: true` to see every request and response with bodies, token requests (redacted), retries and failures. `logger: console` works as-is. Logging is off by default, so a logger alone logs nothing. See [Logging](logging.md) for the events, filtering, turning logging on for some calls (`log`, `sf.withLog()`), and Allure and Playwright report examples.
 
-The older `hooks` option (`onRequest`/`onResponse`) still works but is deprecated. Its events are the logger's `http.request` and `http.response` events without `type`. [Logging](logging.md#migrating-from-hooks) shows how to move over.
+The older `hooks` option (`onRequest`/`onResponse`) still works but is deprecated. Hooks fire without `log: true`, as before; an explicit `log: false` skips them. Its events are the logger's `http.request` and `http.response` events without `type`. [Logging](logging.md#migrating-from-hooks) shows how to move over.

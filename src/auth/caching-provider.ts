@@ -1,4 +1,4 @@
-import { emit, errorText } from "../logging";
+import { emit, errorText, SharedLog } from "../logging";
 import { share, type SharedRequest } from "../shared";
 
 import type { AccessToken, AuthContext, AuthProvider } from "./types";
@@ -13,11 +13,11 @@ const EXPIRY_MARGIN_MS = 60_000;
  * next call fetches a new one.
  *
  * Token events (`auth.tokenIssued`, `auth.tokenCached`, `auth.error`) go to `context.logger`,
- * labeled with `name`. A request shared by concurrent callers is logged with the logger of the
- * caller that started it.
+ * labeled with `name`. A request shared by concurrent callers is logged to each caller's logger,
+ * also to callers that joined after it started (once per logger).
  */
 export class CachingAuthProvider implements AuthProvider {
-	private _pending: SharedRequest<AccessToken> | undefined;
+	private _pending: { request: SharedRequest<AccessToken>; log: SharedLog } | undefined;
 	private _token: { value: AccessToken; fetchedAt: number } | undefined;
 
 	constructor(
@@ -36,10 +36,10 @@ export class CachingAuthProvider implements AuthProvider {
 			});
 			return Promise.resolve(token);
 		}
-		if (!this._pending || this._pending.abandoned) {
-			const { logger } = context;
+		if (!this._pending || this._pending.request.abandoned) {
+			const logger = new SharedLog();
 			const started = Date.now();
-			const pending = share((signal) =>
+			const request = share((signal) =>
 				this._fetchToken({ transport: context.transport, signal, logger }).then(
 					(token) => {
 						this._token = { value: token, fetchedAt: Date.now() };
@@ -66,16 +66,19 @@ export class CachingAuthProvider implements AuthProvider {
 					},
 				),
 			);
+			const pending = { request, log: logger };
 			this._pending = pending;
-			pending.promise
+			request.promise
 				.finally(() => {
+					logger.close();
 					if (this._pending === pending) {
 						this._pending = undefined;
 					}
 				})
 				.catch(() => undefined);
 		}
-		return this._pending.join(context.signal);
+		this._pending.log.join(context.logger);
+		return this._pending.request.join(context.signal);
 	}
 
 	invalidate(token: AccessToken): void {

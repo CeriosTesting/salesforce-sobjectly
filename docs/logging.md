@@ -5,10 +5,10 @@ Attach a logger to see everything the client does: each request to Salesforce an
 ```ts
 import { SalesforceClient } from "@cerios/salesforce-sobjectly";
 
-const sf = new SalesforceClient({ auth, apiVersion: "v66.0", logger: console });
+const sf = new SalesforceClient({ auth, apiVersion: "v66.0", logger: console, log: true });
 ```
 
-Nothing is logged without a logger. With one, every call is logged unless it opts out with [`log: false`](#keeping-a-call-out-of-the-log). You can attach several loggers, and switch the console off while your [custom loggers](#console-and-custom-loggers) keep running.
+Logging is off by default. Nothing is logged until you attach a logger **and** [turn logging on](#turning-logging-on-and-off): for the whole client with `log: true`, for a group of calls with `sf.withLog(true)`, or for one call with its own `log: true`. You can attach several loggers, and keep the console quiet while your [custom loggers](#console-and-custom-loggers) still receive everything.
 
 ## The logger interface
 
@@ -74,7 +74,7 @@ const logger = createLogger((level, message, event) => {
 	}
 });
 
-const sf = new SalesforceClient({ auth, apiVersion: "v66.0", logger });
+const sf = new SalesforceClient({ auth, apiVersion: "v66.0", logger, log: true });
 ```
 
 ### Attach responses to an Allure report
@@ -138,7 +138,7 @@ export const playwrightLogger = createLogger((_level, _message, event) => {
 `logger` takes a list, and every logger in it gets every entry. Here responses go to the Allure report, and everything from `info` up goes to the console:
 
 ```ts
-new SalesforceClient({ auth, apiVersion: "v66.0", logger: [consoleLogger(), allureLogger] });
+new SalesforceClient({ auth, apiVersion: "v66.0", logger: [consoleLogger(), allureLogger], log: true });
 ```
 
 ## Console and custom loggers
@@ -155,6 +155,7 @@ new SalesforceClient({
 		consoleLogger({ enabled: process.env.SF_LOG_CONSOLE !== "false", level: "debug" }),
 		allureLogger, // always on
 	],
+	log: true,
 });
 ```
 
@@ -222,38 +223,75 @@ logger: filterLogger(console, (level) => isLevelEnabled(level, "warn"));
 logger: filterLogger(console, (_level, event) => !event.type.startsWith("cache."));
 ```
 
-## Keeping a call out of the log
+## Turning logging on and off
 
-Pass `log: false` to keep one request out of the logger, for example a call whose response holds credentials or personal data. A token request that call triggers isn't logged either.
+Attaching a logger logs nothing yet. Turn logging on where you want it; the most specific setting wins:
+
+| Where                                                      | Applies to                                                 |
+| ---------------------------------------------------------- | ---------------------------------------------------------- |
+| `new SalesforceClient({ logger, log })`                    | Every call that doesn't say otherwise. Defaults to `false` |
+| `sf.withLog(log)`                                          | Every call made through the client it returns              |
+| A call's own `log`, e.g. `sf.request({ path, log: true })` | That call, including the token request it triggers         |
+
+Each takes the same values:
+
+| `log`                | Console loggers | Custom loggers |
+| -------------------- | --------------- | -------------- |
+| `true`               | yes             | yes            |
+| `{ console: false }` | no              | yes            |
+| `false` (default)    | no              | no             |
+
+`{ console: false }` keeps calls off the console while your custom loggers (an Allure report, say) still get them, for example for a call whose response holds credentials or personal data:
 
 ```ts
-await sf.request({ path: "/services/oauth2/userinfo", log: false });
-await sf.apexRest({ path: "/credentials/vault", log: false });
+const sf = new SalesforceClient({ auth, apiVersion: "v66.0", logger: [consoleLogger(), allureLogger], log: true });
+
+await sf.request({ path: "/services/oauth2/userinfo", log: { console: false } });
+await sf.apexRest({ path: "/credentials/vault", log: false }); // not logged at all
 await sf.instanceUrl({ log: false }); // the token request isn't logged
 ```
 
-To keep a call off the console only, pass `log: { console: false }`. The console loggers skip it, but your custom loggers (an Allure report, say) still get it, including the token request it triggers:
+A call's `log` works on `sf.request`, `sf.requestWithResponse`, `sf.apexRest`, `sf.tooling.request`, `sf.connection.send`/`stream` and `sf.instanceUrl`.
+
+### A group of calls: `withLog`
+
+`sf.withLog(log)` returns a client that uses `log` for everything done through it: its requests, the token requests and metadata lookups they trigger, and the events of long-running operations (bulk job states, report polling, Apex test runs, debug-log capture).
 
 ```ts
-await sf.request({ path: "/services/oauth2/userinfo", log: { console: false } });
-await sf.instanceUrl({ log: { console: false } });
+const quiet = sf.withLog(false);
+for await (const row of quiet.bulk.query("SELECT Id FROM Contact")) {
+	// nothing logged
+}
+
+await sf.withLog(true).sobject("Account").describe(); // logged, also on a client with log: false
 ```
 
-| `log`                | Console loggers | Custom loggers and hooks |
-| -------------------- | --------------- | ------------------------ |
-| `true` (default)     | yes             | yes                      |
-| `{ console: false }` | no              | yes                      |
-| `false`              | no              | no                       |
+The view shares everything else with `sf`: the token, the metadata cache, `apiUsage`, the loggers and `flushLogs`. A call's own `log` still wins over the view.
 
-Events that don't belong to a single request (bulk job states, report polling, cache hits, codegen progress) aren't affected by `log`. To silence those on the console, use `consoleLogger({ enabled: false })` or a `filterLogger`.
+### Long-running operations
 
-`log` defaults to `true`. It works on `sf.request`, `sf.requestWithResponse`, `sf.apexRest`, `sf.tooling.request`, `sf.connection.send`/`stream` and `sf.instanceUrl`.
+These take `log` in their options too, for the calls they make and the events they emit:
 
-The token is cached, so later calls reuse it. When several calls wait on the same token request, the call that started it decides whether that token request is logged.
+| Option                                                                 | Covers                                                                                                                     |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `sf.bulk.ingest()`, `createIngestJob()`, `query()`, `createQueryJob()` | The whole job: create, upload, close, wait and rows. The returned job keeps the setting for the calls you make on it later |
+| `job.waitForCompletion({ log })`                                       | The status checks and `bulk.jobState` events                                                                               |
+| `sf.reports.run()`, `runAsync()`, `waitForInstance()`                  | The run, the status checks and `report.status` events                                                                      |
+| `sf.tooling.runTestsSynchronous()`, `runTestsAsynchronous()`           | The test run and its `tooling.runTests` event                                                                              |
+| `sf.tooling.debugLogs.capture(work, { log })`                          | The calls the capture makes itself and the `debugLogs.*` events. `work` logs as the client it uses does                    |
+
+```ts
+await sf.bulk.ingest({ object: "Account", operation: "insert", records, log: { console: false } });
+await sf.reports.waitForInstance(reportId, instanceId, { log: false });
+```
+
+### Shared token and metadata requests
+
+The token and metadata (describe, object info) are fetched once and shared by the calls that need them at the same time. Each of those calls gets the shared request's events according to its own `log`. So when a call with `log: false` started the token request and a logged call joins it, the logged call still gets `auth.request`, `auth.response` and `auth.tokenIssued`, including the ones from before it joined. A logger gets each event once, however many calls share the request.
 
 ## Custom auth providers
 
-`AuthContext` carries the client's loggers combined into one `logger` (`undefined` with `log: false`, without the console loggers with `log: { console: false }`). Your own `tokenProvider` or `AuthProvider` can log through it:
+`AuthContext` carries the client's loggers combined into one `logger`: `undefined` while logging is off for the call, and without the console loggers with `log: { console: false }`. Your own `tokenProvider` or `AuthProvider` can log through it:
 
 ```ts
 const auth = tokenProvider(async (context) => {
@@ -266,10 +304,11 @@ const auth = tokenProvider(async (context) => {
 
 ## Code generation
 
-`generate()` and `checkGenerated()` take the same logger. Progress arrives at `info` and problems at `warn`. At `debug` you also get the describe calls and the token request. Existing `{ info, warn }` loggers keep working. Both resolve only after an async logger's promises have settled.
+`generate()` and `checkGenerated()` take the same logger. Progress arrives at `info` and problems at `warn`; passing a logger is enough for those. To also log the describe calls and the token request (at `debug`), pass `log: true`. Existing `{ info, warn }` loggers keep working. Both resolve only after an async logger's promises have settled.
 
 ```ts
-await generate(config, { logger: filterLogger(console, (level) => level !== "debug") });
+await generate(config, { logger: console }); // progress and warnings
+await generate(config, { logger: console, log: true }); // also every request
 ```
 
 On the command line, `sobjectly generate --verbose` also prints every request and token call.
@@ -282,7 +321,7 @@ On the command line, `sobjectly generate --verbose` also prints every request an
 
 ## Migrating from `hooks`
 
-`hooks` still works but is deprecated. Each hook maps to one event:
+`hooks` still works but is deprecated. Hooks fire without `log: true`, as they always did; only an explicit `log: false` skips them. Each hook maps to one event, which a logger receives once logging is on:
 
 | Before                         | After                                                                            |
 | ------------------------------ | -------------------------------------------------------------------------------- |

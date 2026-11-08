@@ -608,7 +608,7 @@ describe("generate logging", () => {
 				transport: orgTransport(["Broken"]),
 				continueOnDescribeError: true,
 			},
-			{ cwd, logger },
+			{ cwd, logger, log: true },
 		);
 		const codegen = entries.filter((entry) => entry.event.type.startsWith("codegen."));
 		expect(codegen.map(({ level, event }) => [level, event.type])).toEqual([
@@ -624,6 +624,21 @@ describe("generate logging", () => {
 		expect(entries.some(({ event }) => event.type === "http.request" && event.url.endsWith("/Account/describe"))).toBe(
 			true,
 		);
+	});
+});
+
+describe("generate without log", () => {
+	it("sends only codegen events: the describe calls are logged with log: true", async () => {
+		const types: string[] = [];
+		const logger = createLogger((_level, _message, event) => {
+			types.push(event.type);
+		});
+		await generate(
+			{ output: "x.ts", apiVersion: "v67.0", sobjects: ["Account"], auth, transport: orgTransport() },
+			{ cwd: tempDir(), logger },
+		);
+		expect(types.length).toBeGreaterThan(0);
+		expect(types.every((type) => type.startsWith("codegen."))).toBe(true);
 	});
 });
 

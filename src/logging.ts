@@ -454,17 +454,80 @@ function swallowRejection(result: unknown): void {
 	}
 }
 
+/** The loggers a `combineLoggers` result sends to. */
+const combinedMembers = new WeakMap<SalesforceLogger, readonly SalesforceLogger[]>();
+
 /** Joins loggers into one; each is guarded on its own. */
 export function combineLoggers(...loggers: (SalesforceLogger | undefined)[]): SalesforceLogger | undefined {
-	const present = loggers.filter((logger): logger is SalesforceLogger => logger !== undefined);
+	const present = [...new Set(loggers.flatMap(loggerMembers))];
 	if (present.length <= 1) {
 		return present[0];
 	}
-	return createLogger((level, message, event) => {
+	const combined = createLogger((level, message, event) => {
 		for (const logger of present) {
 			emit(logger, level, message, event);
 		}
 	});
+	combinedMembers.set(combined, present);
+	return combined;
+}
+
+/** The individual loggers behind `logger`: its members when it was combined, otherwise itself. */
+export function loggerMembers(logger: SalesforceLogger | undefined): readonly SalesforceLogger[] {
+	if (!logger) {
+		return [];
+	}
+	return combinedMembers.get(logger) ?? [logger];
+}
+
+/**
+ * The log of work that several callers share (a token request, a metadata load). Every caller
+ * that joins gets its entries, also the ones logged before it joined, and a logger that joins
+ * through several callers gets each entry once. `close` drops the recorded entries once the work
+ * has settled.
+ */
+export class SharedLog implements Required<SalesforceLogger> {
+	private _entries: [SalesforceLogLevel, string, SalesforceLogEvent][] | undefined = [];
+	private readonly _targets = new Set<SalesforceLogger>();
+
+	join(logger: SalesforceLogger | undefined): void {
+		for (const member of loggerMembers(logger)) {
+			if (this._targets.has(member)) {
+				continue;
+			}
+			this._targets.add(member);
+			for (const [level, message, event] of this._entries ?? []) {
+				emit(member, level, message, event);
+			}
+		}
+	}
+
+	close(): void {
+		this._entries = undefined;
+	}
+
+	debug(message: string, event: SalesforceLogEvent): void {
+		this.log("debug", message, event);
+	}
+
+	info(message: string, event: SalesforceLogEvent): void {
+		this.log("info", message, event);
+	}
+
+	warn(message: string, event: SalesforceLogEvent): void {
+		this.log("warn", message, event);
+	}
+
+	error(message: string, event: SalesforceLogEvent): void {
+		this.log("error", message, event);
+	}
+
+	private log(level: SalesforceLogLevel, message: string, event: SalesforceLogEvent): void {
+		this._entries?.push([level, message, event]);
+		for (const target of this._targets) {
+			emit(target, level, message, event);
+		}
+	}
 }
 
 /** Adapts the (deprecated) request hooks: they receive the same events as before, without `type`. */

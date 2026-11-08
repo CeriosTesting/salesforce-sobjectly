@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { clientCredentials, refreshToken, tokenProvider } from "../src/auth/providers";
 import { type RunCommand, sfCli } from "../src/auth/sf-cli";
 import { MetadataCache } from "../src/cache";
+import type { SalesforceClient, SalesforceClientOptions } from "../src/client";
 import { SalesforceError } from "../src/errors";
 import type { HttpTransport } from "../src/http/transport";
 import {
@@ -16,7 +17,12 @@ import {
 	type SalesforceLogLevel,
 } from "../src/logging";
 
-import { API, createClient, FakeTransport, INSTANCE_URL } from "./helpers/fake-transport";
+import { API, createClient as createBaseClient, FakeTransport, INSTANCE_URL } from "./helpers/fake-transport";
+
+/** Logging is off by default; these tests turn it on for the client unless they pass `log`. */
+function createClient(transport: FakeTransport, options: Partial<SalesforceClientOptions> = {}): SalesforceClient {
+	return createBaseClient(transport, { log: true, ...options });
+}
 
 interface Entry {
 	level: SalesforceLogLevel;
@@ -565,5 +571,251 @@ describe("flushLogs", () => {
 		expect(await sf.flushLogs({ timeoutMs: 5 })).toBe(false);
 		resolveHook();
 		expect(await sf.flushLogs()).toBe(true);
+	});
+});
+
+const credentials = (): ReturnType<typeof clientCredentials> =>
+	clientCredentials({ loginUrl: LOGIN_URL, clientId: "id", clientSecret: "SECRET" });
+
+function printer(): Pick<Console, SalesforceLogLevel> & { lines: string[] } {
+	const lines: string[] = [];
+	const write = (message: string): void => {
+		lines.push(message);
+	};
+	return { lines, debug: write, info: write, warn: write, error: write };
+}
+
+describe("logging is off by default", () => {
+	it("logs nothing until a call turns it on, and then also its token request", async () => {
+		const { logger, types } = collector();
+		const sf = createBaseClient(oauthTransport(), { logger, auth: credentials() });
+		await sf.request({ path: "/limits", log: true });
+		expect(types()).toEqual(["auth.request", "auth.response", "auth.tokenIssued", "http.request", "http.response"]);
+
+		const quiet = collector();
+		const other = createBaseClient(oauthTransport([{ body: { name: "Account", fields: [] } }]), {
+			logger: quiet.logger,
+			auth: credentials(),
+		});
+		await other.sobject("Account").describe();
+		await other.request({ path: "/limits" });
+		await other.instanceUrl();
+		expect(quiet.types()).toEqual([]);
+	});
+
+	it("logs to the custom loggers only with the client option log: { console: false }", async () => {
+		const custom = collector();
+		const out = printer();
+		const sf = createBaseClient(new FakeTransport().reply({ body: {} }), {
+			logger: [consoleLogger({ level: "debug", output: out }), custom.logger],
+			log: { console: false },
+		});
+		await sf.request({ path: "/x" });
+		expect(out.lines).toEqual([]);
+		expect(custom.types()).toEqual(["http.request", "http.response"]);
+	});
+
+	it("keeps the deprecated hooks firing, unless a call or the client says log: false", async () => {
+		const onRequest = vi.fn<() => void>();
+		// oxlint-disable-next-line typescript/no-deprecated -- hooks keep their behavior
+		const sf = createBaseClient(new FakeTransport().reply({ body: {} }, { body: {} }), { hooks: { onRequest } });
+		await sf.request({ path: "/x" });
+		await sf.request({ path: "/x", log: false });
+		expect(onRequest).toHaveBeenCalledTimes(1);
+
+		const silenced = vi.fn<() => void>();
+		await createBaseClient(new FakeTransport().reply({ body: {} }), {
+			// oxlint-disable-next-line typescript/no-deprecated -- hooks keep their behavior
+			hooks: { onRequest: silenced },
+			log: false,
+		}).request({ path: "/x" });
+		expect(silenced).not.toHaveBeenCalled();
+	});
+});
+
+describe("withLog", () => {
+	it("applies its setting to every call through the view, and a call's own log still wins", async () => {
+		const { logger, types } = collector();
+		const sf = createBaseClient(new FakeTransport(() => ({ body: { name: "Account", fields: [] } })), { logger });
+		await sf.request({ path: "/a" });
+		expect(types()).toEqual([]);
+
+		const logged = sf.withLog(true);
+		await logged.request({ path: "/b" });
+		await logged.request({ path: "/c", log: false });
+		await logged.sobject("Account").describe();
+		expect(types()).toEqual(["http.request", "http.response", "cache.miss", "http.request", "http.response"]);
+	});
+
+	it("withLog(false) silences the calls and events of a logging client", async () => {
+		const { logger, types } = collector();
+		const job = (state: string): { body: Record<string, unknown> } => ({
+			body: { id: "750J", object: "Account", operation: "insert", state },
+		});
+		const sf = createClient(new FakeTransport().reply(job("InProgress"), job("JobComplete")), { logger });
+		const ingest = await sf.withLog(false).bulk.ingestJob("750J");
+		await ingest.waitForCompletion({ pollIntervalMs: 1 });
+		expect(types()).toEqual([]);
+	});
+
+	it("shares the token request, metadata cache, API usage and flushLogs with its client", async () => {
+		let tokens = 0;
+		let describes = 0;
+		const transport = new FakeTransport((request) => {
+			if (request.path === "/services/oauth2/token") {
+				tokens++;
+				return { body: tokenBody("TOKEN") };
+			}
+			describes++;
+			return { body: { name: "Account", fields: [] }, headers: { "sforce-limit-info": "api-usage=5/100" } };
+		});
+		let settled = 0;
+		const sf = createBaseClient(transport, {
+			logger: createLogger(
+				() =>
+					new Promise<void>((resolve) => {
+						setTimeout(() => {
+							settled++;
+							resolve();
+						}, 5);
+					}),
+			),
+			auth: credentials(),
+		});
+		const view = sf.withLog(true);
+		await Promise.all([view.sobject("Account").describe(), sf.sobject("Account").describe()]);
+		await sf.sobject("Account").describe();
+		expect(tokens).toBe(1);
+		expect(describes).toBe(1);
+		expect(sf.apiUsage).toEqual({ used: 5, max: 100 });
+		expect(view.apiUsage).toEqual({ used: 5, max: 100 });
+		expect(await sf.flushLogs({ timeoutMs: 1_000 })).toBe(true);
+		expect(settled).toBeGreaterThan(0);
+	});
+});
+
+describe("shared work logs to every caller", () => {
+	it("logs a shared token request once, also when the call that started it had log: false", async () => {
+		const { logger, types } = collector();
+		const sf = createClient(oauthTransport(), { logger, auth: credentials() });
+		await Promise.all([sf.request({ path: "/a", log: false }), sf.request({ path: "/b" })]);
+		expect(types()).toEqual(["auth.request", "auth.response", "auth.tokenIssued", "http.request", "http.response"]);
+	});
+
+	it("logs a token request shared by two logged calls once", async () => {
+		const { logger, types } = collector();
+		const sf = createClient(oauthTransport(), { logger, auth: credentials() });
+		await Promise.all([sf.request({ path: "/a" }), sf.request({ path: "/b" })]);
+		expect(types().filter((type) => type.startsWith("auth."))).toEqual([
+			"auth.request",
+			"auth.response",
+			"auth.tokenIssued",
+		]);
+	});
+
+	it("sends each logger the shared token request once when calls use different log settings", async () => {
+		const custom = collector();
+		const out = printer();
+		const sf = createClient(oauthTransport(), {
+			logger: [consoleLogger({ level: "debug", output: out }), custom.logger],
+			auth: credentials(),
+		});
+		await Promise.all([sf.request({ path: "/a", log: { console: false } }), sf.request({ path: "/b" })]);
+		expect(custom.types().filter((type) => type.startsWith("auth."))).toEqual([
+			"auth.request",
+			"auth.response",
+			"auth.tokenIssued",
+		]);
+		expect(out.lines.filter((line) => line.includes("/services/oauth2/token"))).toHaveLength(2);
+	});
+
+	it("replays what was logged before a caller joined, in order", async () => {
+		const { logger, types } = collector();
+		let release = (): void => undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const transport = new FakeTransport(async (request) => {
+			if (request.path === "/services/oauth2/token") {
+				await gate;
+				return { body: tokenBody("TOKEN") };
+			}
+			return { body: {} };
+		});
+		const sf = createClient(transport, { logger, auth: credentials() });
+		const first = sf.request({ path: "/a", log: false });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(types()).toEqual([]);
+		const second = sf.request({ path: "/b" });
+		expect(types()).toEqual(["auth.request"]);
+		release();
+		await Promise.all([first, second]);
+		expect(types()).toEqual(["auth.request", "auth.response", "auth.tokenIssued", "http.request", "http.response"]);
+	});
+
+	it("logs a shared metadata load to a caller that joined it", async () => {
+		const { logger, types } = collector();
+		const sf = createClient(new FakeTransport(() => ({ body: { name: "Account", fields: [] } })), { logger });
+		await Promise.all([sf.withLog(false).sobject("Account").describe(), sf.sobject("Account").describe()]);
+		expect(types()).toEqual(["cache.hit", "http.request", "http.response"]);
+	});
+});
+
+describe("log on long-running operations", () => {
+	it("bulk: the whole ingest, and later calls on its job, follow the option", async () => {
+		const custom = collector();
+		const out = printer();
+		const job = (state: string): { body: Record<string, unknown> } => ({
+			body: { id: "750J", object: "Account", operation: "insert", state },
+		});
+		const sf = createBaseClient(
+			new FakeTransport().reply(job("Open"), { status: 201 }, job("UploadComplete"), job("JobComplete"), {
+				body: "",
+				headers: { "content-type": "text/csv" },
+			}),
+			{ logger: [consoleLogger({ level: "debug", output: out }), custom.logger] },
+		);
+		const ingest = await sf.bulk.ingest({
+			object: "Account",
+			operation: "insert",
+			records: [{ Name: "Acme" }],
+			wait: { pollIntervalMs: 1 },
+			log: { console: false },
+		});
+		await ingest.failedResults();
+		expect(out.lines).toEqual([]);
+		expect(custom.types().filter((type) => type === "http.request")).toHaveLength(5);
+		expect(custom.types()).toContain("bulk.jobState");
+	});
+
+	it("bulk: waitForCompletion({ log: false }) logs no polling", async () => {
+		const { logger, types } = collector();
+		const sf = createClient(
+			new FakeTransport().reply(
+				{ body: { id: "750J", state: "UploadComplete" } },
+				{ body: { id: "750J", state: "JobComplete" } },
+			),
+			{ logger },
+		);
+		const ingest = await sf.bulk.ingestJob("750J");
+		await ingest.waitForCompletion({ pollIntervalMs: 1, log: false });
+		expect(types()).toEqual(["http.request", "http.response"]);
+	});
+
+	it("reports and Apex test runs follow their log option", async () => {
+		const { logger, types } = collector();
+		const transport = new FakeTransport().reply(
+			{ body: { attributes: {} } },
+			{ body: { numTestsRun: 1, numFailures: 0, totalTime: 5, successes: [], failures: [] } },
+		);
+		const sf = createClient(transport, { logger });
+		await sf.reports.run("00OA00000000001", { log: false });
+		await sf.tooling.runTestsSynchronous({ tests: [{ className: "MyTest" }] }, { log: false });
+		expect(types()).toEqual([]);
+
+		await createBaseClient(transport.reply({ body: { attributes: { status: "Success" } } }), {
+			logger,
+		}).reports.waitForInstance("00OA00000000001", "0LGA", { log: true });
+		expect(types()).toEqual(["http.request", "http.response", "report.status"]);
 	});
 });

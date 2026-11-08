@@ -9,7 +9,7 @@ import { checkGenerated, findConfigFiles, generate, loadConfig } from "./codegen
 import { type InitAnswers, parseSObjects, runInit } from "./codegen/init";
 import { readlinePrompter } from "./codegen/prompter";
 import { PICKLIST_MODES } from "./codegen/validate-config";
-import { filterLogger, type SalesforceLogger } from "./logging";
+import type { SalesforceLogger } from "./logging";
 
 const HELP = `Usage: sobjectly <command> [options]
 
@@ -174,11 +174,11 @@ async function runGenerate(values: Values): Promise<number> {
 		debug: (message: string): void => console.error(message),
 	};
 	// Without --verbose only codegen progress and warnings show, not every request.
-	const logger = values.verbose ? output : filterLogger(output, (_level, event) => event.type.startsWith("codegen."));
+	const logOptions = { cwd: directory, logger: output, log: values.verbose === true };
 	if (values.check) {
-		return reportCheck(await checkGenerated(config, { cwd: directory, logger }));
+		return reportCheck(await checkGenerated(config, logOptions));
 	}
-	const result = await generate(config, { cwd: directory, logger, write: !values.stdout });
+	const result = await generate(config, { ...logOptions, write: !values.stdout });
 	if (values.stdout) {
 		process.stdout.write(result.source);
 	}

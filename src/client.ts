@@ -56,10 +56,19 @@ export interface SalesforceClientOptions {
 	 * (secrets redacted), retries, failures, metadata cache use and long-running operations.
 	 * Pass one logger or several, e.g. `[consoleLogger(), allureLogger]`. `console` works as-is; see
 	 * `createLogger` for custom sinks such as test reports and `consoleLogger({ enabled })` for a
-	 * console you can switch off. Keep a request out of every logger with `log: false`, or off the
-	 * console only with `log: { console: false }`.
+	 * console you can switch off.
+	 *
+	 * Nothing is logged until you turn logging on: for every call with `log: true`, for some calls
+	 * with `sf.withLog(true)`, or for one call with its own `log: true`.
 	 */
 	logger?: SalesforceLoggerOption;
+	/**
+	 * Whether calls are logged when they don't pass `log` themselves. Defaults to `false`, so a
+	 * `logger` logs nothing until this, a `withLog` view or a call turns it on. `{ console: false }`
+	 * logs to the custom loggers only (not `console` or `consoleLogger()`). The deprecated `hooks`
+	 * keep firing unless this (or a call) is explicitly `false`.
+	 */
+	log?: boolean | RequestLogOptions;
 	/**
 	 * Observability hooks, e.g. for logging request and response bodies. Tokens are redacted.
 	 *
@@ -72,6 +81,15 @@ export interface SalesforceClientOptions {
 	 * the client. Defaults to `true`; clear it with `clearCache()`.
 	 */
 	cache?: boolean;
+}
+
+/** Passes a `withLog` view's shared parts to the constructor, out of the public options type. */
+const CLIENT_VIEW = Symbol("SalesforceClient.view");
+
+interface ClientView {
+	connection: SalesforceConnection;
+	cache: MetadataCache;
+	debugLogCaptures: Map<string, Promise<void>>;
 }
 
 export interface ApexRestRequest extends Omit<RestRequest, "path"> {
@@ -126,36 +144,62 @@ export class SalesforceClient<R extends object = GenericRegistry> {
 	private readonly _cache: MetadataCache;
 
 	constructor(options: SalesforceClientOptions) {
-		if (!options?.auth) {
+		const view = (options as { [CLIENT_VIEW]?: ClientView } | undefined)?.[CLIENT_VIEW];
+		if (!view && !options?.auth) {
 			throw new TypeError("SalesforceClient requires an auth provider.");
 		}
-		this.connection = new SalesforceConnection({
-			auth: options.auth,
-			transport: options.transport ?? fetchTransport(),
-			apiVersion: options.apiVersion,
-			timeoutMs: options.timeoutMs,
-			retry: options.retry,
-			allowedOrigins: options.allowedOrigins,
-			headers: options.headers,
-			logger: options.logger,
-			// oxlint-disable-next-line typescript/no-deprecated -- hooks stay supported, through the logger
-			hooks: options.hooks,
-		});
+		this.connection =
+			view?.connection ??
+			new SalesforceConnection({
+				auth: options.auth,
+				transport: options.transport ?? fetchTransport(),
+				apiVersion: options.apiVersion,
+				timeoutMs: options.timeoutMs,
+				retry: options.retry,
+				allowedOrigins: options.allowedOrigins,
+				headers: options.headers,
+				logger: options.logger,
+				log: options.log,
+				// oxlint-disable-next-line typescript/no-deprecated -- hooks stay supported, through the logger
+				hooks: options.hooks,
+			});
 		this._queries = new QueryApi(this.connection);
 		this.search = new SearchApi(this.connection);
 		this.composite = new CompositeApi<R>(this.connection);
 		this.collections = new CollectionsApi<R>(this.connection);
 		this.actions = new ActionsApi(this.connection);
-		this.tooling = new ToolingApi(this.connection);
+		this.tooling = new ToolingApi(this.connection, view?.debugLogCaptures);
 		this.bulk = new BulkApi<R>(this.connection);
 		this.events = new EventsApi<R>(this.connection);
-		this._cache = new MetadataCache(options.cache !== false, this.connection.logger);
+		this._cache = view?.cache ?? new MetadataCache(options.cache !== false, this.connection.logger);
 		this.approvals = new ApprovalsApi(this.connection, this._queries);
 		this.quickActions = new QuickActionsApi(this.connection, "/quickActions");
 		this.uiApi = new UiApi<R>(this.connection, this._cache);
 		this.files = new FilesApi(this.connection);
 		this.reports = new ReportsApi(this.connection);
 		this.users = new UsersApi(this.connection);
+	}
+
+	/**
+	 * A client that uses `log` for every call that doesn't pass `log` itself, including the token
+	 * requests, metadata lookups and long-running operations it starts:
+	 *
+	 * ```ts
+	 * await sf.withLog(true).bulk.ingest({ object: "Account", operation: "insert", records });
+	 * const report = sf.withLog({ console: false }); // custom loggers only, e.g. a test report
+	 * ```
+	 *
+	 * It shares everything else with this client: the token, metadata cache, API usage, loggers and
+	 * `flushLogs`. A call's own `log` still wins.
+	 */
+	withLog(log: boolean | RequestLogOptions): SalesforceClient<R> {
+		const connection = this.connection.withLog(log);
+		const view: ClientView = {
+			connection,
+			cache: this._cache.withLogger(connection.logger),
+			debugLogCaptures: this.tooling.debugLogs.captures,
+		};
+		return new SalesforceClient<R>({ [CLIENT_VIEW]: view } as unknown as SalesforceClientOptions);
 	}
 
 	/** Drops cached metadata (describe results, object info, record type ids). */
@@ -295,7 +339,7 @@ export class SalesforceClient<R extends object = GenericRegistry> {
 	describeGlobal(options: { signal?: AbortSignal } = {}): Promise<DescribeGlobalResult> {
 		return this._cache.getOrLoad(
 			"describe-global",
-			(signal) => this.connection.request({ path: "/sobjects", signal }),
+			(signal, logger) => this.connection.withLogger(logger).request({ path: "/sobjects", signal }),
 			options.signal,
 		);
 	}

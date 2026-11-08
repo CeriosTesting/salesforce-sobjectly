@@ -10,6 +10,7 @@ import {
 	combineLoggers,
 	emit,
 	PendingLogs,
+	type RequestLogOptions,
 	type SalesforceLogger,
 	type SalesforceLoggerOption,
 	toLoggers,
@@ -66,6 +67,7 @@ export { consoleLogger, createLogger, filterLogger, isConsoleLogger, isLevelEnab
 export type {
 	ConsoleLoggerOptions,
 	FlushLogsOptions,
+	RequestLogOptions,
 	SalesforceLogEvent,
 	SalesforceLogger,
 	SalesforceLoggerOption,
@@ -77,10 +79,15 @@ export interface GenerateOptions {
 	/** Directory that `output` is resolved against. Defaults to `process.cwd()`. */
 	cwd?: string;
 	/**
-	 * Receives progress (`info`), warnings (`warn`) and, with `debug`, the HTTP and auth calls made
-	 * while describing. A `{ info, warn }` object or `console` works.
+	 * Receives progress (`info`) and warnings (`warn`). A `{ info, warn }` object or `console` works.
+	 * The HTTP and auth calls made while describing are logged to it too with `log: true`.
 	 */
 	logger?: SalesforceLoggerOption;
+	/**
+	 * Also log the HTTP and auth calls made while describing (`true`), or only to the custom
+	 * loggers (`{ console: false }`). Defaults to `false`; progress and warnings are always logged.
+	 */
+	log?: boolean | RequestLogOptions;
 	/** Where `"${NAME}"` placeholders and the default `SF_*` variables are read from. Defaults to `process.env`. */
 	env?: Record<string, string | undefined>;
 	/** Write the file. Defaults to `true`; with `false` the source is only returned. */
@@ -217,6 +224,7 @@ async function buildSource(
 		transport: config.transport,
 		retry: true,
 		logger: loggers,
+		log: options.log,
 	});
 
 	const names = await resolveSObjectNames(client, config, logger);

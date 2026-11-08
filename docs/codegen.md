@@ -243,7 +243,7 @@ The file is written atomically (to a temp file, then renamed), and the output is
 ```ts
 import { checkGenerated, generate, generateSource } from "@cerios/salesforce-sobjectly/codegen";
 
-await generate(config, { cwd: process.cwd(), logger: console }); // any SalesforceLogger; see logging.md
+await generate(config, { cwd: process.cwd(), logger: console }); // progress and warnings; log: true adds every request (logging.md)
 const { source } = await generate(config, { write: false }); // don't write, just return the source
 const check = await checkGenerated(config); // { upToDate, reason, added, removed, changed }
 const source = generateSource(describes, { picklists: "string" }); // pure: describes in, source out

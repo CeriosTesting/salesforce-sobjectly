@@ -1,6 +1,6 @@
 import { SalesforceBulkJobError } from "../errors";
 import { type SalesforceConnection, segment, sleep } from "../http/connection";
-import { emit, type SalesforceLogger } from "../logging";
+import { emit, type RequestLogOptions, type SalesforceLogger } from "../logging";
 import type { ExternalIdField, SObjectFieldName, SObjectName, SObjectRecord } from "../registry";
 import type { NoSelection, SoqlQueryBuilder, SoqlQueryRecord } from "../soql/query-builder";
 import type {
@@ -50,6 +50,11 @@ export interface WaitOptions {
 	/** Give up after this many milliseconds. Defaults to 10 minutes. */
 	timeoutMs?: number;
 	signal?: AbortSignal;
+	/**
+	 * Log the status checks and `bulk.jobState` events (`true`), keep it out of the log (`false`) or off the console only
+	 * (`{ console: false }`). Defaults to the client's (or `withLog` view's) setting.
+	 */
+	log?: boolean | RequestLogOptions;
 }
 
 export interface BulkIngestJobOptions<K extends string = string> {
@@ -61,6 +66,11 @@ export interface BulkIngestJobOptions<K extends string = string> {
 	columnDelimiter?: BulkColumnDelimiter;
 	lineEnding?: BulkLineEnding;
 	signal?: AbortSignal;
+	/**
+	 * Log the job's calls and events (`ingest()`: create, upload, close and wait). The job keeps the setting for later calls (`true`), keep it out of the log (`false`) or off the console only
+	 * (`{ console: false }`). Defaults to the client's (or `withLog` view's) setting.
+	 */
+	log?: boolean | RequestLogOptions;
 }
 
 export interface BulkIngestOptions<R extends object, K extends SObjectName<R>> extends BulkIngestJobOptions<K> {
@@ -83,6 +93,11 @@ export interface BulkQueryOptions {
 	maxRecords?: number;
 	wait?: WaitOptions;
 	signal?: AbortSignal;
+	/**
+	 * Log the job's calls and events (create, wait and rows). The job keeps the setting for later calls (`true`), keep it out of the log (`false`) or off the console only
+	 * (`{ console: false }`). Defaults to the client's (or `withLog` view's) setting.
+	 */
+	log?: boolean | RequestLogOptions;
 }
 
 /** A Bulk API 2.0 ingest job. */
@@ -135,14 +150,18 @@ export class BulkIngestJob {
 	}
 
 	/** Fetches the current job status. */
-	async refresh(options: { signal?: AbortSignal } = {}): Promise<BulkJobInfo> {
-		this.info = await this._connection.request<BulkJobInfo>({ path: this.path, signal: options.signal });
+	async refresh(options: { signal?: AbortSignal; log?: boolean | RequestLogOptions } = {}): Promise<BulkJobInfo> {
+		this.info = await this._connection.request<BulkJobInfo>({
+			path: this.path,
+			signal: options.signal,
+			log: options.log,
+		});
 		return this.info;
 	}
 
 	/** Polls until the job is `JobComplete`. Throws `SalesforceBulkJobError` on `Failed`, `Aborted` or timeout. */
 	waitForCompletion(options: WaitOptions = {}): Promise<BulkJobInfo> {
-		return waitForJob(this, options, this._connection.logger);
+		return waitForJob(this, options, this._connection.loggerFor(options.log));
 	}
 
 	/** Successfully processed rows: `sf__Id`, `sf__Created` and the uploaded columns. */
@@ -196,14 +215,18 @@ export class BulkQueryJob<TRow = Record<string, string>> {
 		return `/jobs/query/${segment(this.id)}`;
 	}
 
-	async refresh(options: { signal?: AbortSignal } = {}): Promise<BulkJobInfo> {
-		this.info = await this._connection.request<BulkJobInfo>({ path: this.path, signal: options.signal });
+	async refresh(options: { signal?: AbortSignal; log?: boolean | RequestLogOptions } = {}): Promise<BulkJobInfo> {
+		this.info = await this._connection.request<BulkJobInfo>({
+			path: this.path,
+			signal: options.signal,
+			log: options.log,
+		});
 		return this.info;
 	}
 
 	/** Polls until the job is `JobComplete`. Throws `SalesforceBulkJobError` on `Failed`, `Aborted` or timeout. */
 	waitForCompletion(options: WaitOptions = {}): Promise<BulkJobInfo> {
-		return waitForJob(this, options, this._connection.logger);
+		return waitForJob(this, options, this._connection.loggerFor(options.log));
 	}
 
 	async abort(options: { signal?: AbortSignal } = {}): Promise<BulkJobInfo> {
@@ -275,7 +298,8 @@ export class BulkApi<R extends object> {
 		if (options.operation === "upsert" && !options.externalIdFieldName) {
 			throw new Error("Bulk upsert requires externalIdFieldName.");
 		}
-		const info = await this._connection.request<BulkJobInfo>({
+		const connection = this._connection.withLog(options.log);
+		const info = await connection.request<BulkJobInfo>({
 			method: "POST",
 			path: "/jobs/ingest",
 			body: {
@@ -289,7 +313,7 @@ export class BulkApi<R extends object> {
 			},
 			signal: options.signal,
 		});
-		return new BulkIngestJob(this._connection, info);
+		return new BulkIngestJob(connection, info);
 	}
 
 	/** Attaches to an existing ingest job. */
@@ -348,7 +372,8 @@ export class BulkApi<R extends object> {
 			throw new Error("Bulk API 2.0 does not support TYPEOF; use sf.query()/sf.collect() instead.");
 		}
 		const operation: BulkQueryOperation = options.includeDeleted ? "queryAll" : "query";
-		const info = await this._connection.request<BulkJobInfo>({
+		const connection = this._connection.withLog(options.log);
+		const info = await connection.request<BulkJobInfo>({
 			method: "POST",
 			path: "/jobs/query",
 			body: {
@@ -360,7 +385,7 @@ export class BulkApi<R extends object> {
 			},
 			signal: options.signal,
 		});
-		return new BulkQueryJob(this._connection, info);
+		return new BulkQueryJob(connection, info);
 	}
 
 	/** Attaches to an existing query job. */
@@ -404,7 +429,11 @@ function withSignal(wait: WaitOptions, signal: AbortSignal | undefined): WaitOpt
 }
 
 async function waitForJob(
-	job: { id: string; info: BulkJobInfo; refresh(options: { signal?: AbortSignal }): Promise<BulkJobInfo> },
+	job: {
+		id: string;
+		info: BulkJobInfo;
+		refresh(options: { signal?: AbortSignal; log?: boolean | RequestLogOptions }): Promise<BulkJobInfo>;
+	},
 	options: WaitOptions,
 	logger: SalesforceLogger | undefined,
 ): Promise<BulkJobInfo> {
@@ -412,7 +441,7 @@ async function waitForJob(
 	const deadline = Date.now() + (options.timeoutMs ?? 10 * 60_000);
 	let previous: BulkJobState | undefined;
 	for (;;) {
-		const info = await job.refresh({ signal: options.signal });
+		const info = await job.refresh({ signal: options.signal, log: options.log });
 		const changed = info.state !== previous;
 		previous = info.state;
 		emit(

@@ -1,5 +1,5 @@
 import type { RestRequest, SalesforceConnection } from "../http/connection";
-import { emit } from "../logging";
+import { emit, type RequestLogOptions } from "../logging";
 import type { GenericRegistry } from "../registry";
 import type { ExecuteAnonymousResult, RunTestsRequest } from "../types/api";
 import type { GenericRecord } from "../types/common";
@@ -48,14 +48,36 @@ export interface ExecuteAnonymousOptions {
 	signal?: AbortSignal;
 }
 
+export interface RunTestsOptions {
+	signal?: AbortSignal;
+	/**
+	 * Log the test run and its `tooling.runTests` event (`true`), keep it out of the log (`false`) or off the console only
+	 * (`{ console: false }`). Defaults to the client's (or `withLog` view's) setting.
+	 */
+	log?: boolean | RequestLogOptions;
+}
+
 export class ToolingApi {
 	private readonly _queries: QueryApi;
 	/** Apex debug logs: capture the logs of a block of work, list and read logs. */
 	readonly debugLogs: DebugLogsApi;
 
-	constructor(private readonly _connection: SalesforceConnection) {
+	/** `debugLogCaptures` is internal: a `withLog` view shares the capture queue of its client. */
+	constructor(
+		private readonly _connection: SalesforceConnection,
+		debugLogCaptures?: Map<string, Promise<void>>,
+	) {
 		this._queries = new QueryApi(_connection, "/tooling");
-		this.debugLogs = new DebugLogsApi(this);
+		this.debugLogs = new DebugLogsApi(this, debugLogCaptures);
+	}
+
+	/**
+	 * This API through a connection with another log setting, sharing the debug-log capture queue.
+	 *
+	 * @internal
+	 */
+	withLog(log: boolean | RequestLogOptions): ToolingApi {
+		return new ToolingApi(this._connection.withLog(log), this.debugLogs.captures);
 	}
 
 	/** The connection this API uses. */
@@ -132,16 +154,17 @@ export class ToolingApi {
 	}
 
 	/** Runs Apex tests synchronously (a single class) and returns the results. */
-	async runTestsSynchronous(request: RunTestsRequest, options: { signal?: AbortSignal } = {}): Promise<RunTestsResult> {
+	async runTestsSynchronous(request: RunTestsRequest, options: RunTestsOptions = {}): Promise<RunTestsResult> {
 		const result = await this._connection.request<RunTestsResult>({
 			method: "POST",
 			path: "/tooling/runTestsSynchronous/",
 			body: request,
 			signal: options.signal,
+			log: options.log,
 			timeoutMs: 0,
 		});
 		emit(
-			this._connection.logger,
+			this._connection.loggerFor(options.log),
 			"info",
 			`Ran ${result.numTestsRun} Apex test(s): ${result.numFailures} failure(s) in ${result.totalTime} ms`,
 			{ type: "tooling.runTests", mode: "sync", numTestsRun: result.numTestsRun, numFailures: result.numFailures },
@@ -150,14 +173,15 @@ export class ToolingApi {
 	}
 
 	/** Enqueues Apex tests and returns the AsyncApexJob id. */
-	async runTestsAsynchronous(request: RunTestsRequest, options: { signal?: AbortSignal } = {}): Promise<string> {
+	async runTestsAsynchronous(request: RunTestsRequest, options: RunTestsOptions = {}): Promise<string> {
 		const jobId = await this._connection.request<string>({
 			method: "POST",
 			path: "/tooling/runTestsAsynchronous/",
 			body: request,
 			signal: options.signal,
+			log: options.log,
 		});
-		emit(this._connection.logger, "info", `Enqueued Apex tests as job ${jobId}`, {
+		emit(this._connection.loggerFor(options.log), "info", `Enqueued Apex tests as job ${jobId}`, {
 			type: "tooling.runTests",
 			mode: "async",
 			jobId,

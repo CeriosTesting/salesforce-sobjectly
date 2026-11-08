@@ -1,6 +1,7 @@
 import type { MetadataCache } from "../cache";
 import { SalesforceSaveError } from "../errors";
 import { externalIdText, type SalesforceConnection, segment } from "../http/connection";
+import type { SalesforceLogger } from "../logging";
 import type {
 	ChildRelationshipName,
 	ChildSObjectName,
@@ -72,11 +73,14 @@ export class SObjectResource<R extends object, K extends SObjectName<R>> {
 
 	/** `GET /sobjects/{name}/describe`: fields, relationships, record types, ... Cached per client. */
 	describe(options: RequestSignal = {}): Promise<DescribeSObjectResult> {
-		const load = (signal: AbortSignal | undefined): Promise<DescribeSObjectResult> =>
-			this._connection.request({ path: `${this.path}/describe`, signal });
+		const load = (
+			signal: AbortSignal | undefined,
+			logger: SalesforceLogger | undefined,
+		): Promise<DescribeSObjectResult> =>
+			this._connection.withLogger(logger).request({ path: `${this.path}/describe`, signal });
 		return this._cache
 			? this._cache.getOrLoad(`describe:${this._basePath}:${this.name}`, load, options.signal)
-			: load(options.signal);
+			: load(options.signal, this._connection.logger);
 	}
 
 	/**

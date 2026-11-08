@@ -170,7 +170,7 @@ export type { SearchSuggestionsOptions } from "./resources/search";
 export { SObjectResource } from "./resources/sobject";
 export type { PicklistOption, RequestSignal, UpsertOutcome } from "./resources/sobject";
 export { ApexExecutionError, ToolingApi } from "./resources/tooling";
-export type { ExecuteAnonymousOptions, RunTestsResult } from "./resources/tooling";
+export type { ExecuteAnonymousOptions, RunTestsOptions, RunTestsResult } from "./resources/tooling";
 export { DEBUG_LEVEL_NAME, DEFAULT_DEBUG_LEVELS, DebugLogCaptureError, DebugLogsApi } from "./resources/debug-logs";
 export type {
 	ApexLogEntry,
