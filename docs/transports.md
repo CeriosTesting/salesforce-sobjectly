@@ -30,8 +30,8 @@ new SalesforceClient({ apiVersion: "v66.0", auth, transport: fetchTransport({ fe
 The package does not bundle axios, because Node's built-in `fetch` does the same job. If you already use axios (for its interceptors, proxy agents or mocking), it takes about 15 lines:
 
 ```ts
-import axios from "axios";
 import type { HttpTransport } from "@cerios/salesforce-sobjectly";
+import axios from "axios";
 
 export function axiosTransport(instance = axios.create()): HttpTransport {
 	return {
@@ -62,8 +62,8 @@ Other clients (undici, got, ky) follow the same pattern.
 In Playwright tests you can send requests through Playwright's [`APIRequestContext`](https://playwright.dev/docs/api/class-apirequestcontext). They then show up in the trace viewer, and the context's proxy and `ignoreHTTPSErrors` settings apply. The package does not depend on Playwright, so copy this adapter:
 
 ```ts
-import type { APIRequestContext } from "@playwright/test";
 import type { HttpTransport } from "@cerios/salesforce-sobjectly";
+import type { APIRequestContext } from "@playwright/test";
 
 export function playwrightTransport(context: APIRequestContext): HttpTransport {
 	return {
@@ -91,8 +91,9 @@ export function playwrightTransport(context: APIRequestContext): HttpTransport {
 Use it with the `request` fixture, or with a context from `request.newContext()`:
 
 ```ts
-import { test, expect } from "@playwright/test";
 import { SalesforceClient } from "@cerios/salesforce-sobjectly";
+import { test, expect } from "@playwright/test";
+
 import { API_VERSION, type SObjectRegistry } from "./generated/sobjects";
 
 test("creates an account", async ({ request }) => {

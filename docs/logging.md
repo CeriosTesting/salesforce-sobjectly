@@ -82,8 +82,8 @@ const sf = new SalesforceClient({ auth, apiVersion: "v66.0", logger });
 With `allure-js-commons`, attach each call as JSON. The handler returns Allure's promise; requests don't wait for it, but [`sf.flushLogs()`](#waiting-for-async-loggers) does.
 
 ```ts
-import * as allure from "allure-js-commons";
 import { createLogger, type HttpResponseLogEvent } from "@cerios/salesforce-sobjectly";
+import * as allure from "allure-js-commons";
 
 function readable(body: string | Uint8Array | undefined): unknown {
 	if (typeof body !== "string") return body && `<${body.byteLength} bytes>`;

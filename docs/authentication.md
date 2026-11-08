@@ -59,6 +59,7 @@ This flow authenticates as a specific user with a certificate uploaded to the ap
 
 ```ts
 import { readFileSync } from "node:fs";
+
 import { jwtBearer } from "@cerios/salesforce-sobjectly";
 
 const auth = jwtBearer({
@@ -92,6 +93,7 @@ const auth = refreshToken({
 ```ts
 import { SalesforceClient } from "@cerios/salesforce-sobjectly";
 import { loadAuth } from "@cerios/salesforce-sobjectly/codegen";
+
 import { API_VERSION, type SObjectRegistry } from "./generated/sobjects";
 
 const sf = new SalesforceClient<SObjectRegistry>({ apiVersion: API_VERSION, auth: await loadAuth() });

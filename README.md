@@ -77,6 +77,7 @@ npx sobjectly generate --env-file .env
 
 ```ts
 import { SalesforceClient, clientCredentials } from "@cerios/salesforce-sobjectly";
+
 import { API_VERSION, type SObjectRegistry } from "./generated/sobjects";
 
 const sf = new SalesforceClient<SObjectRegistry>({
